@@ -1,7 +1,5 @@
 
 // STL
-#include "BulletCollision/CollisionShapes/btSphereShape.h"
-#include "BulletDynamics/Dynamics/btRigidBody.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -10,6 +8,7 @@
 #include <set>
 #include <string>
 #include <tuple>
+#include <variant>
 #include <vector>
 
 // script
@@ -62,6 +61,9 @@ struct PhysicMat {
 
 constexpr static const PhysicMat Wall{0.8f, 0.0f, 0.0f, 0.05f};
 constexpr static const PhysicMat Box{0.6f, 0.0f, 0.0f, 0.0f};
+
+constexpr float BulletSpeed = 120.0f;
+constexpr float GrappleSpeed = 80.0f;
 
 struct Cube {
   Vector3 size{};
@@ -129,12 +131,11 @@ struct Context {
   btBroadphaseInterface *overlapping_pair_cache{};
   btSequentialImpulseConstraintSolver *solver{};
   btDiscreteDynamicsWorld *dynamics_world{};
-  std::optional<Vector3> lastHit{};
-  std::set<int> selection{};
   // player
   Vector3 startPos{};
   Vector2 camAngles{};
   btRigidBody *player{};
+  std::optional<std::variant<Particle>> grapple;
   // GUI
   char commandBuffer[1024]{};
   std::string command{};
@@ -182,6 +183,7 @@ void CleanRigidBody(Context &ctx, btRigidBody *&rb) {
 }
 
 void CleanCube(Context &ctx, Cube &c) { CleanRigidBody(ctx, c.rb); }
+void CleanSphere(Context &ctx, Sphere &s) { CleanRigidBody(ctx, s.rb); }
 
 Camera3D GetCamera(Context &ctx) {
   Camera3D r{};
@@ -239,13 +241,10 @@ void CreatePlayerCapsule(Context &ctx, Vector3 pos) {
   ctx.startPos = Vector3Subtract(pos, {0, -0.5, 0});
 }
 
-void CreatePhysicCube(Context &ctx, uint32_t index, Cube &c, const Vector3 &pos,
-                      const Vector3 &rotation, const PhysicMat &pm,
-                      const std::optional<DynParams> &params = {}) {
-  const Vector3 halfSize = Vector3Scale(c.size, 0.5f);
-  btBoxShape *collider_shape =
-      new btBoxShape(toBtV3(halfSize) + btVector3{pm.extent, 0.0f, pm.extent});
-
+btRigidBody *CreatePhysicShape(Context &ctx, btCollisionShape *collider_shape,
+                               uint32_t t, uint32_t index, const Vector3 &pos,
+                               const Vector3 &rotation, const PhysicMat &pm,
+                               const std::optional<DynParams> &params = {}) {
   const btTransform transform = MakeTransform(pos, rotation);
 
   const auto np = params.value_or(DynParams{0.0f, {0.0f, 0.0f, 0.0f}});
@@ -253,12 +252,11 @@ void CreatePhysicCube(Context &ctx, uint32_t index, Cube &c, const Vector3 &pos,
   const btScalar object_mass(mass);
   const Vector3 li = std::get<1>(np);
   const btVector3 speed = toBtV3(li);
-  const ID id{.i = index, .t = 0};
+  const ID id{.i = index, .t = t};
 
   btVector3 local_inertia{0, 0, 0};
-  if (params || mass != 0.0) {
+  if (params || mass != 0.0)
     collider_shape->calculateLocalInertia(mass, local_inertia);
-  }
 
   btDefaultMotionState *motion_state = new btDefaultMotionState(transform);
 
@@ -275,44 +273,25 @@ void CreatePhysicCube(Context &ctx, uint32_t index, Cube &c, const Vector3 &pos,
   body->setLinearVelocity(speed);
   ctx.dynamics_world->addRigidBody(body);
 
-  c.rb = body;
+  return body;
+}
+
+void CreatePhysicCube(Context &ctx, uint32_t index, Cube &c, const Vector3 &pos,
+                      const Vector3 &rotation, const PhysicMat &pm,
+                      const std::optional<DynParams> &params = {}) {
+  const Vector3 halfSize = Vector3Scale(c.size, 0.5f);
+  btCollisionShape *collider_shape =
+      new btBoxShape(toBtV3(halfSize) + btVector3{pm.extent, 0.0f, pm.extent});
+  c.rb = CreatePhysicShape(ctx, collider_shape, 0, index, pos, rotation, pm,
+                           params);
 }
 
 void CreatePhysicSphere(Context &ctx, uint32_t index, Sphere &s,
                         const Vector3 &pos, const PhysicMat &pm,
                         const std::optional<DynParams> &params = {}) {
-  btSphereShape *collider_shape = new btSphereShape(s.size);
-
-  const btTransform transform = MakeTransform(pos, {0, 0, 0});
-
-  const auto np = params.value_or(DynParams{0.0f, {0.0f, 0.0f, 0.0f}});
-  const float mass = 5 * std::get<0>(np);
-  const btScalar object_mass(mass);
-  const Vector3 li = std::get<1>(np);
-  const btVector3 speed = toBtV3(li);
-  const ID id{.i = index, .t = 1};
-
-  btVector3 local_inertia{0, 0, 0};
-  if (params || mass != 0.0) {
-    collider_shape->calculateLocalInertia(mass, local_inertia);
-  }
-
-  btDefaultMotionState *motion_state = new btDefaultMotionState(transform);
-
-  btRigidBody::btRigidBodyConstructionInfo rb_info{
-      object_mass, motion_state, collider_shape, local_inertia};
-  rb_info.m_friction = pm.friction;
-  rb_info.m_rollingFriction = pm.frictionRoll;
-  rb_info.m_spinningFriction = pm.frictionSpin;
-  rb_info.m_linearDamping = 0.6f;
-  rb_info.m_angularDamping = 0.4f;
-
-  btRigidBody *body = new btRigidBody(rb_info);
-  body->setUserIndex(id.v);
-  body->setLinearVelocity(speed);
-  ctx.dynamics_world->addRigidBody(body);
-
-  s.rb = body;
+  btCollisionShape *collider_shape = new btSphereShape(s.size);
+  s.rb = CreatePhysicShape(ctx, collider_shape, 1, index, pos, {0, 0, 0}, pm,
+                           params);
 }
 
 void LoadImgMap(Context &ctx) {
@@ -375,13 +354,12 @@ void LoadImgMap(Context &ctx) {
 
   if (startPos) {
     CreatePlayerCapsule(ctx, *startPos);
-    // CreatePlayerCapsule(ctx, { 0, 1, 0 });
   }
 
   UnloadImage(img);
 }
 
-void LoadDbMap(Context &ctx) {
+void LoadDbMap(Context &ctx, Vector3 offset) {
   sqlite3 *db = nullptr;
   SQ3(sqlite3_open("assets/test.db", &db));
 
@@ -407,8 +385,9 @@ void LoadDbMap(Context &ctx) {
         sscanf((const char *)col, "%02x%02x%02x", &r, &g, &b);
         c = Color{uint8_t(r), uint8_t(g), uint8_t(b), 255};
       }
-      const Vector3 pos{px, py + 0.5f * sy, pz};
-      ctx.cubes.push_back({{sx, sy, sz}, c, 1}, [&](size_t i, Cube &c) {
+      const Vector3 pos{px + offset.x, py + 0.5f * sy + offset.y,
+                        pz + offset.z};
+      ctx.cubes.push_back({{sx, sy, sz}, c, 2}, [&](size_t i, Cube &c) {
         CreatePhysicCube(ctx, i, c, pos, {0, 0, 0}, Wall);
       });
     }
@@ -419,8 +398,6 @@ void LoadDbMap(Context &ctx) {
 }
 
 int Cmd_load_map(ClientData data, Tcl_Interp *, int, Tcl_Obj *const *) {
-  TraceLog(LOG_INFO, "load map");
-  LoadDbMap(*((Context *)data));
   return TCL_OK;
 }
 
@@ -484,7 +461,7 @@ void Init(Context &ctx) {
   InitDB(ctx);
   InitRender(ctx);
   InitPhysics(ctx);
-  LoadDbMap(ctx);
+  LoadDbMap(ctx, {90, 0.3, 112});
   LoadImgMap(ctx);
 }
 
@@ -501,6 +478,7 @@ void ReleaseRender(Context &ctx) {
 
 void ReleasePhysics(Context &ctx) {
   ctx.cubes.clear(CleanCube, ctx);
+  ctx.spheres.clear(CleanSphere, ctx);
   CleanRigidBody(ctx, ctx.player);
   delete ctx.dynamics_world;
   delete ctx.solver;
@@ -539,51 +517,51 @@ std::optional<CResult> CheckRayCollision(Context &ctx, Vector3 from,
                  st};
 }
 
+std::optional<CResult> CheckRayCollision(Context &ctx, const Particle &b,
+                                         float speed, Vector3 *pos = nullptr) {
+  const float dt0 = ctx.pgtime - b.startTime;
+  const float dt1 = ctx.gtime - b.startTime;
+  const Vector3 from = Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt0));
+  const Vector3 to = Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt1));
+  if (pos)
+    *pos = to;
+  return CheckRayCollision(ctx, from, to);
+}
+
+bool MoveBullet(Context &ctx, const Particle &b) {
+  const auto cpos = CheckRayCollision(ctx, b, BulletSpeed);
+  if (!cpos)
+    return false;
+
+  for (int i = 0; i < 10; ++i) {
+    const float dx = float(GetRandomValue(-1000, 1000)) / 1000.0f;
+    const float dy = float(GetRandomValue(-1000, 1000)) / 1000.0f;
+    const float dz = float(GetRandomValue(-1000, 1000)) / 1000.0f;
+    ctx.particles.push_back(
+        {cpos->pos, Vector3Add(cpos->normal, {dx, dy, dz}), ctx.gtime});
+  }
+
+  if (!cpos->st) {
+    const ID id{.v = uint32_t(cpos->index)};
+    const float force = 100.0f;
+    if (id.t == 0) {
+      auto *rb = ctx.cubes.at(id.i).rb;
+      rb->setActivationState(ACTIVE_TAG);
+      rb->applyImpulse(force * toBtV3(b.dir), {0, -0.1, 0});
+    } else if (id.t == 1) {
+      auto *rb = ctx.spheres.at(id.i).rb;
+      rb->setActivationState(ACTIVE_TAG);
+      rb->applyImpulse(force * toBtV3(b.dir).normalize(), {0, -0.1, 0});
+    }
+  }
+
+  return true;
+}
+
 void UpdateBullets(Context &ctx) {
   ctx.bullets.erase(
-      std::remove_if(
-          ctx.bullets.begin(), ctx.bullets.end(),
-          [&](const Particle &b) {
-            const float dt0 = ctx.pgtime - b.startTime;
-            const float dt1 = ctx.gtime - b.startTime;
-            const float speed = 120.0f;
-            const Vector3 from =
-                Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt0));
-            const Vector3 to =
-                Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt1));
-
-            const auto cpos = CheckRayCollision(ctx, from, to);
-            if (!cpos)
-              return false;
-
-            for (int i = 0; i < 10; ++i) {
-              const float dx = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-              const float dy = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-              const float dz = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-              ctx.particles.push_back({cpos->pos,
-                                       Vector3Add(cpos->normal, {dx, dy, dz}),
-                                       ctx.gtime});
-            }
-
-            if (!cpos->st) {
-              const ID id{.v = uint32_t(cpos->index)};
-              const float force = 100.0f;
-              if (id.t == 0) {
-                ctx.selection = {id.i};
-                auto *rb = ctx.cubes.at(id.i).rb;
-                rb->setActivationState(ACTIVE_TAG);
-                rb->applyImpulse(force * toBtV3(b.dir), {0, -0.1, 0});
-              } else if (id.t == 1) {
-                ctx.selection = {};
-                auto *rb = ctx.spheres.at(id.i).rb;
-                rb->setActivationState(ACTIVE_TAG);
-                rb->applyImpulse(force * toBtV3(b.dir).normalize(),
-                                 {0, -0.1, 0});
-              }
-            }
-
-            return true;
-          }),
+      std::remove_if(ctx.bullets.begin(), ctx.bullets.end(),
+                     [&](const Particle &b) { return MoveBullet(ctx, b); }),
       ctx.bullets.end());
 }
 
@@ -603,6 +581,30 @@ bool Update(Context &ctx) {
   }
 
   Camera3D cam = GetCamera(ctx);
+
+  if (ctx.grapple) {
+    auto cpos =
+        CheckRayCollision(ctx, std::get<Particle>(*ctx.grapple), GrappleSpeed);
+    if (cpos) {
+      const float force = -200.0f;
+      const ID id{.v = uint32_t(cpos->index)};
+      const auto delta = (toBtV3(cpos->pos) - toBtV3(cam.position)).normalize();
+      if (!cpos->st) {
+        if (id.t == 0) {
+          auto *rb = ctx.cubes.at(id.i).rb;
+          rb->setActivationState(ACTIVE_TAG);
+          rb->applyImpulse(force * delta, {0, -0.1, 0});
+        } else if (id.t == 1) {
+          auto *rb = ctx.spheres.at(id.i).rb;
+          rb->setActivationState(ACTIVE_TAG);
+          rb->applyImpulse(force * delta, {0, -0.1, 0});
+        }
+      } else {
+        ctx.player->applyCentralImpulse(-force * delta);
+      }
+      ctx.grapple = {};
+    }
+  }
 
   if (ctx.lockCursor) {
     const float camSpeed = 0.003f;
@@ -639,10 +641,6 @@ bool Update(Context &ctx) {
     }
 
     ctx.dynamics_world->stepSimulation(1.0 / float(ctx.FPS), 1);
-
-    if (IsKeyPressed(KEY_F5)) {
-      LoadDbMap(ctx);
-    }
 
     if (IsKeyPressed(KEY_SPACE)) {
       const auto from = cam.position;
@@ -681,50 +679,42 @@ bool Update(Context &ctx) {
 
     UpdateBullets(ctx);
 
-    if (IsMouseButtonPressed(0)) {
+    {
       const Vector3 startPos = Vector3Add(cam.position, {0, -0.09, 0});
       const Vector3 dir =
           Vector3Normalize(Vector3Subtract(cam.target, cam.position));
-      ctx.bullets.push_back({startPos, dir, ctx.gtime});
-    }
 
-    if (/*IsMouseButtonPressed(0) ||*/ IsMouseButtonPressed(1)) {
-      const float force = -200.0f;
-      const auto from = cam.position;
-      const auto dir = Vector3Normalize(Vector3Subtract(cam.target, from));
-      const auto to = Vector3Add(from, Vector3Scale(dir, 2000.0f));
-      const btVector3 bf{from.x, from.y, from.z};
-      const btVector3 bt{to.x, to.y, to.z};
-      btCollisionWorld::ClosestRayResultCallback cb{bf, bt};
-      ctx.dynamics_world->rayTest(bf, bt, cb);
-      if (cb.hasHit()) {
-        const auto h = cb.m_hitPointWorld;
-        ctx.lastHit = toRlV3(h);
-        if (cb.m_collisionObject) {
-          const bool st = cb.m_collisionObject->isStaticObject();
-          const int idx = cb.m_collisionObject->getUserIndex();
-          const ID id{.v = uint32_t(idx)};
-          if (!st) {
+      if (IsMouseButtonPressed(0)) {
+        ctx.bullets.push_back({startPos, dir, ctx.gtime});
+      }
+
+      if (IsMouseButtonPressed(1)) {
+#if 1
+        ctx.grapple = Particle{cam.position, dir, ctx.gtime};
+#else
+        const float force = -200.0f;
+        const auto from = cam.position;
+        const auto dir = Vector3Normalize(Vector3Subtract(cam.target, from));
+        const auto to = Vector3Add(from, Vector3Scale(dir, 2000.0f));
+        const auto cpos = CheckRayCollision(ctx, from, to);
+        if (cpos) {
+          const ID id{.v = uint32_t(cpos->index)};
+          const auto delta = (toBtV3(to) - toBtV3(from)).normalize();
+          if (!cpos->st) {
             if (id.t == 0) {
-              ctx.selection = {id.i};
               auto *rb = ctx.cubes.at(id.i).rb;
               rb->setActivationState(ACTIVE_TAG);
-              rb->applyImpulse(force * (bt - bf).normalize(), {0, -0.1, 0});
+              rb->applyImpulse(force * delta, {0, -0.1, 0});
             } else if (id.t == 1) {
-              ctx.selection = {};
               auto *rb = ctx.spheres.at(id.i).rb;
               rb->setActivationState(ACTIVE_TAG);
-              rb->applyImpulse(force * (bt - bf).normalize(), {0, -0.1, 0});
+              rb->applyImpulse(force * delta, {0, -0.1, 0});
             }
           } else {
-            ctx.player->applyCentralImpulse(-force * (bt - bf).normalize());
+            ctx.player->applyCentralImpulse(-force * delta);
           }
-        } else {
-          ctx.selection = {};
         }
-      } else {
-        ctx.selection = {};
-        ctx.lastHit = {};
+#endif
       }
     }
   } else {
@@ -746,10 +736,14 @@ Rectangle Inset(Rectangle r, float i = 2.0f) {
 }
 
 void RenderView(Context &ctx, const Camera &cam) {
-  /*
-  DrawCapsule(Vector3Add(cam.position, {0, -0.2, 0}),
-              ctx.lastHit.value_or(cam.target), 0.005f, 4, 4, WHITE);
-  */
+  if (ctx.grapple) {
+    Vector3 pos{};
+    const Vector3 startPos = Vector3Add(cam.position, {0, -0.09, 0});
+    CheckRayCollision(ctx, std::get<Particle>(*ctx.grapple), GrappleSpeed,
+                      &pos);
+    DrawCapsule(startPos, pos, 0.005f, 4, 4, WHITE);
+  }
+
 #if 0
   {
     btTransform bt;
@@ -765,6 +759,7 @@ void RenderView(Context &ctx, const Camera &cam) {
     DrawModelEx(ctx.models[0], pos, axis, angle, Vector3{sz, sz, sz}, WHITE);
   }
 #endif
+
   ctx.cubes.forEach([&](size_t i, Cube &c) {
     btTransform bt;
     c.rb->getMotionState()->getWorldTransform(bt);
@@ -833,7 +828,7 @@ void RenderBullets(Context &ctx) {
   for (const auto &b : ctx.bullets) {
     const float dt0 = ctx.pgtime - b.startTime;
     const float dt1 = ctx.gtime - b.startTime;
-    const float speed = 120.0f;
+    const float speed = BulletSpeed;
     const Vector3 from =
         Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt0));
     const Vector3 to = Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt1));
@@ -851,7 +846,9 @@ void RenderHUD(Context &ctx) {
   }
 
   char buffer[2048]{};
-  snprintf(buffer, sizeof(buffer), "%d fps", GetFPS());
+  const Camera cam = GetCamera(ctx);
+  snprintf(buffer, sizeof(buffer), "%d fps\n(%.02f,%.02f,%.02f)", GetFPS(),
+           cam.position.x, cam.position.y, cam.position.z);
   DrawText(buffer, 0, 0, 20, WHITE);
 }
 
