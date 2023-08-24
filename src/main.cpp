@@ -1,6 +1,7 @@
 
 // STL
 #include "BulletCollision/CollisionShapes/btSphereShape.h"
+#include "BulletDynamics/Dynamics/btRigidBody.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -143,9 +144,11 @@ struct Context {
   int W{1280}, H{720};
   int FPS{60};
   int frame{};
+  double pgtime{};
   double gtime{};
   std::vector<Model> models{};
   std::vector<Particle> particles{};
+  std::vector<Particle> bullets{};
   ObjectList<Cube> cubes;
   ObjectList<Sphere> spheres;
 };
@@ -319,8 +322,8 @@ void LoadImgMap(Context &ctx) {
   std::optional<Vector3> startPos{};
 
   uint8_t *const pixels = static_cast<uint8_t *>(img.data);
-  const float psz = 10.0f;
-  const float fh = 4.0f;
+  const float psz = 5.0f;
+  const float fh = 3.0f;
   const Vector3 szc{psz, fh, psz};
 
   const auto isWall = [](Color c) -> bool {
@@ -357,7 +360,8 @@ void LoadImgMap(Context &ctx) {
             const Color co = GetMapAt(x + offsets[i][0], y + offsets[i][1],
                                       f + offsets[i][2]);
             if (!isWall(co)) {
-              const Color col = RndCol(76, 10);
+              const int fc = f & 1;
+              const Color col = RndCol(76 + fc * 30, 10);
               ctx.cubes.push_back({szc, col, index}, [&](size_t i, Cube &c) {
                 CreatePhysicCube(ctx, i, c, cpos, {0, 0, 0}, Wall);
               });
@@ -514,10 +518,80 @@ void Release(Context &ctx) {
 
 // ================================================================================
 
+struct CResult {
+  Vector3 pos{};
+  Vector3 normal{};
+  int index{};
+  bool st{};
+};
+
+std::optional<CResult> CheckRayCollision(Context &ctx, Vector3 from,
+                                         Vector3 to) {
+  const btVector3 bf = toBtV3(from);
+  const btVector3 bt = toBtV3(to);
+  btCollisionWorld::ClosestRayResultCallback cb{bf, bt};
+  ctx.dynamics_world->rayTest(bf, bt, cb);
+  if (!cb.hasHit())
+    return {};
+  const bool st = cb.m_collisionObject->isStaticObject();
+  const int idx = cb.m_collisionObject->getUserIndex();
+  return CResult{toRlV3(cb.m_hitPointWorld), toRlV3(cb.m_hitNormalWorld), idx,
+                 st};
+}
+
+void UpdateBullets(Context &ctx) {
+  ctx.bullets.erase(
+      std::remove_if(
+          ctx.bullets.begin(), ctx.bullets.end(),
+          [&](const Particle &b) {
+            const float dt0 = ctx.pgtime - b.startTime;
+            const float dt1 = ctx.gtime - b.startTime;
+            const float speed = 120.0f;
+            const Vector3 from =
+                Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt0));
+            const Vector3 to =
+                Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt1));
+
+            const auto cpos = CheckRayCollision(ctx, from, to);
+            if (!cpos)
+              return false;
+
+            for (int i = 0; i < 10; ++i) {
+              const float dx = float(GetRandomValue(-1000, 1000)) / 1000.0f;
+              const float dy = float(GetRandomValue(-1000, 1000)) / 1000.0f;
+              const float dz = float(GetRandomValue(-1000, 1000)) / 1000.0f;
+              ctx.particles.push_back({cpos->pos,
+                                       Vector3Add(cpos->normal, {dx, dy, dz}),
+                                       ctx.gtime});
+            }
+
+            if (!cpos->st) {
+              const ID id{.v = uint32_t(cpos->index)};
+              const float force = 100.0f;
+              if (id.t == 0) {
+                ctx.selection = {id.i};
+                auto *rb = ctx.cubes.at(id.i).rb;
+                rb->setActivationState(ACTIVE_TAG);
+                rb->applyImpulse(force * toBtV3(b.dir), {0, -0.1, 0});
+              } else if (id.t == 1) {
+                ctx.selection = {};
+                auto *rb = ctx.spheres.at(id.i).rb;
+                rb->setActivationState(ACTIVE_TAG);
+                rb->applyImpulse(force * toBtV3(b.dir).normalize(),
+                                 {0, -0.1, 0});
+              }
+            }
+
+            return true;
+          }),
+      ctx.bullets.end());
+}
+
 bool Update(Context &ctx) {
   const bool esc = IsKeyPressed(KEY_ESCAPE);
   const bool quit = ctx.lockCursor && esc;
 
+  ctx.pgtime = ctx.gtime;
   ctx.gtime += 1.0 / float(ctx.FPS);
 
   if (IsKeyPressed(KEY_F1) || esc) {
@@ -605,9 +679,17 @@ bool Update(Context &ctx) {
       });
     }
 
-    if (IsMouseButtonPressed(0) || IsMouseButtonPressed(1)) {
-      const bool grapple = IsMouseButtonPressed(1);
-      const float force = grapple ? -200.0f : 100.0f;
+    UpdateBullets(ctx);
+
+    if (IsMouseButtonPressed(0)) {
+      const Vector3 startPos = Vector3Add(cam.position, {0, -0.09, 0});
+      const Vector3 dir =
+          Vector3Normalize(Vector3Subtract(cam.target, cam.position));
+      ctx.bullets.push_back({startPos, dir, ctx.gtime});
+    }
+
+    if (/*IsMouseButtonPressed(0) ||*/ IsMouseButtonPressed(1)) {
+      const float force = -200.0f;
       const auto from = cam.position;
       const auto dir = Vector3Normalize(Vector3Subtract(cam.target, from));
       const auto to = Vector3Add(from, Vector3Scale(dir, 2000.0f));
@@ -619,17 +701,6 @@ bool Update(Context &ctx) {
         const auto h = cb.m_hitPointWorld;
         ctx.lastHit = toRlV3(h);
         if (cb.m_collisionObject) {
-          if (!grapple) {
-            for (int i = 0; i < 10; ++i) {
-              const float dx = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-              const float dy = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-              const float dz = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-              ctx.particles.push_back(
-                  {toRlV3(h),
-                   toRlV3(cb.m_hitNormalWorld + btVector3{dx, dy, dz}),
-                   ctx.gtime});
-            }
-          }
           const bool st = cb.m_collisionObject->isStaticObject();
           const int idx = cb.m_collisionObject->getUserIndex();
           const ID id{.v = uint32_t(idx)};
@@ -646,8 +717,7 @@ bool Update(Context &ctx) {
               rb->applyImpulse(force * (bt - bf).normalize(), {0, -0.1, 0});
             }
           } else {
-            if (grapple)
-              ctx.player->applyCentralImpulse(-force * (bt - bf).normalize());
+            ctx.player->applyCentralImpulse(-force * (bt - bf).normalize());
           }
         } else {
           ctx.selection = {};
@@ -676,8 +746,10 @@ Rectangle Inset(Rectangle r, float i = 2.0f) {
 }
 
 void RenderView(Context &ctx, const Camera &cam) {
+  /*
   DrawCapsule(Vector3Add(cam.position, {0, -0.2, 0}),
               ctx.lastHit.value_or(cam.target), 0.005f, 4, 4, WHITE);
+  */
 #if 0
   {
     btTransform bt;
@@ -693,7 +765,6 @@ void RenderView(Context &ctx, const Camera &cam) {
     DrawModelEx(ctx.models[0], pos, axis, angle, Vector3{sz, sz, sz}, WHITE);
   }
 #endif
-
   ctx.cubes.forEach([&](size_t i, Cube &c) {
     btTransform bt;
     c.rb->getMotionState()->getWorldTransform(bt);
@@ -758,6 +829,19 @@ void RenderParticles(Context &ctx) {
       ctx.particles.end());
 }
 
+void RenderBullets(Context &ctx) {
+  for (const auto &b : ctx.bullets) {
+    const float dt0 = ctx.pgtime - b.startTime;
+    const float dt1 = ctx.gtime - b.startTime;
+    const float speed = 120.0f;
+    const Vector3 from =
+        Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt0));
+    const Vector3 to = Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt1));
+    const float sz = 0.01f;
+    DrawCapsule(from, to, sz, 8, 4, {255, 255, 255, 90});
+  }
+}
+
 void RenderHUD(Context &ctx) {
   if (ctx.lockCursor) {
     const float x = 0.5 * GetScreenWidth();
@@ -780,6 +864,7 @@ void Render(Context &ctx) {
     BeginMode3D(cam);
     {
       RenderView(ctx, cam);
+      RenderBullets(ctx);
       RenderParticles(ctx);
     }
     EndMode3D();

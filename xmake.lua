@@ -1,5 +1,5 @@
 
--- magick convert map00.xcf pnm:- | magick montage - -background blue -geometry +1+1 map00.png
+-- magick convert map00.xcf pnm:- | magick montage - -background blue -tile x1 -geometry +1+1 map00.png
 
 add_rules("mode.debug", "mode.release")
 
