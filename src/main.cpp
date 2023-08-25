@@ -340,7 +340,7 @@ void LoadImgMap(Context &ctx) {
                                       f + offsets[i][2]);
             if (!isWall(co)) {
               const int fc = f & 1;
-              const Color col = RndCol(76 + fc * 30, 10);
+              const Color col = RndCol(76 + fc * 30, 6);
               ctx.cubes.push_back({szc, col, index}, [&](size_t i, Cube &c) {
                 CreatePhysicCube(ctx, i, c, cpos, {0, 0, 0}, Wall);
               });
@@ -528,18 +528,24 @@ std::optional<CResult> CheckRayCollision(Context &ctx, const Particle &b,
   return CheckRayCollision(ctx, from, to);
 }
 
+void AddParticles(Context &ctx, Vector3 pos, Vector3 normal, int count) {
+  for (int i = 0; i < count; ++i) {
+    const float dx = float(GetRandomValue(-1000, 1000)) / 1000.0f;
+    const float dy = float(GetRandomValue(-1000, 1000)) / 1000.0f;
+    const float dz = float(GetRandomValue(-1000, 1000)) / 1000.0f;
+    ctx.particles.push_back(
+        {pos,
+         Vector3Add(normal, Vector3Scale(Vector3Normalize({dx, dy, dz}), 0.5f)),
+         ctx.gtime});
+  }
+}
+
 bool MoveBullet(Context &ctx, const Particle &b) {
   const auto cpos = CheckRayCollision(ctx, b, BulletSpeed);
   if (!cpos)
     return false;
 
-  for (int i = 0; i < 10; ++i) {
-    const float dx = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-    const float dy = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-    const float dz = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-    ctx.particles.push_back(
-        {cpos->pos, Vector3Add(cpos->normal, {dx, dy, dz}), ctx.gtime});
-  }
+  AddParticles(ctx, cpos->pos, cpos->normal, 10);
 
   if (!cpos->st) {
     const ID id{.v = uint32_t(cpos->index)};
@@ -590,6 +596,7 @@ bool Update(Context &ctx) {
       const ID id{.v = uint32_t(cpos->index)};
       const auto delta = (toBtV3(cpos->pos) - toBtV3(cam.position)).normalize();
       if (!cpos->st) {
+        AddParticles(ctx, cpos->pos, cpos->normal, 50);
         if (id.t == 0) {
           auto *rb = ctx.cubes.at(id.i).rb;
           rb->setActivationState(ACTIVE_TAG);
@@ -631,12 +638,13 @@ bool Update(Context &ctx) {
         strafe += 1.0f;
 
       auto *rb = ctx.player;
-      /*if (fwd != 0.0f || strafe != 0.0f)*/ {
-        const btVector3 speedVec = fwd * toBtV3(move) + strafe * toBtV3(side);
-        btVector3 lv = rb->getLinearVelocity();
-        lv = {speed * speedVec.x(), lv.y(), speed * speedVec.z()};
-        rb->setLinearVelocity(lv);
-      }
+      const btVector3 speedVec = fwd * toBtV3(move) + strafe * toBtV3(side);
+      const btVector3 lv = rb->getLinearVelocity();
+      const btVector3 nlv = {speed * speedVec.x(), lv.y(), speed * speedVec.z()};
+      const float r0 = 16.0f;
+      const float r1 = lv.length2();
+      const float rt = 1.0f / (r0 + r1);
+      rb->setLinearVelocity(rt * r1 * lv + rt * r0 * nlv);
       rb->setAngularFactor(0.0);
     }
 
@@ -689,32 +697,7 @@ bool Update(Context &ctx) {
       }
 
       if (IsMouseButtonPressed(1)) {
-#if 1
         ctx.grapple = Particle{cam.position, dir, ctx.gtime};
-#else
-        const float force = -200.0f;
-        const auto from = cam.position;
-        const auto dir = Vector3Normalize(Vector3Subtract(cam.target, from));
-        const auto to = Vector3Add(from, Vector3Scale(dir, 2000.0f));
-        const auto cpos = CheckRayCollision(ctx, from, to);
-        if (cpos) {
-          const ID id{.v = uint32_t(cpos->index)};
-          const auto delta = (toBtV3(to) - toBtV3(from)).normalize();
-          if (!cpos->st) {
-            if (id.t == 0) {
-              auto *rb = ctx.cubes.at(id.i).rb;
-              rb->setActivationState(ACTIVE_TAG);
-              rb->applyImpulse(force * delta, {0, -0.1, 0});
-            } else if (id.t == 1) {
-              auto *rb = ctx.spheres.at(id.i).rb;
-              rb->setActivationState(ACTIVE_TAG);
-              rb->applyImpulse(force * delta, {0, -0.1, 0});
-            }
-          } else {
-            ctx.player->applyCentralImpulse(-force * delta);
-          }
-        }
-#endif
       }
     }
   } else {
