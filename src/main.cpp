@@ -142,11 +142,14 @@ struct Context {
   std::vector<std::string> history{};
   bool lockCursor{true};
   // render
-  int W{1280}, H{720};
+  // int W{1280}, H{720};
+  int W{640}, H{400};
   int FPS{60};
   int frame{};
   double pgtime{};
   double gtime{};
+  Shader shader{};
+  RenderTexture rt{};
   std::vector<Model> models{};
   std::vector<Particle> particles{};
   std::vector<Particle> bullets{};
@@ -184,6 +187,19 @@ void CleanRigidBody(Context &ctx, btRigidBody *&rb) {
 
 void CleanCube(Context &ctx, Cube &c) { CleanRigidBody(ctx, c.rb); }
 void CleanSphere(Context &ctx, Sphere &s) { CleanRigidBody(ctx, s.rb); }
+
+Vector3 GetCameraOffset(Context &ctx, Vector3 o) {
+  btTransform bt;
+  ctx.player->getMotionState()->getWorldTransform(bt);
+  const auto p = bt.getOrigin();
+  const Vector3 pos = toRlV3(p + btVector3{0, 0.3, 0});
+  const Vector3 d{sinf(ctx.camAngles.x), 0, cosf(ctx.camAngles.x)};
+  const Vector3 n{-d.z, 0, d.x};
+  const Vector3 v0 = Vector3Scale(d, o.x);
+  const Vector3 v1 = Vector3Scale({0, 1, 0}, o.y);
+  const Vector3 v2 = Vector3Scale(n, o.z);
+  return Vector3Add(pos, Vector3Add(Vector3Add(v0, v1), v2));
+}
 
 Camera3D GetCamera(Context &ctx) {
   Camera3D r{};
@@ -416,24 +432,30 @@ void InitRender(Context &ctx) {
   DisableCursor();
   SetExitKey(0);
 
-  const auto makeTexturedCube = [](const char *path) -> Model {
+  ctx.rt = LoadRenderTexture(ctx.W, ctx.H);
+  ctx.shader =
+      LoadShader("assets/shaders/default.vs", "assets/shaders/default.fs");
+
+  const auto makeTexturedCube = [&](const char *path) -> Model {
     Texture t = LoadTexture(path);
     GenTextureMipmaps(&t);
     SetTextureFilter(t, TEXTURE_FILTER_BILINEAR);
     SetTextureFilter(t, TEXTURE_FILTER_ANISOTROPIC_16X);
     Mesh msh = GenMeshCube(1, 1, 1);
     Model m = LoadModelFromMesh(msh);
+    m.materials[0].shader = ctx.shader;
     m.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = t;
     return m;
   };
 
-  const auto makeTexturedSphere = [](const char *path) -> Model {
+  const auto makeTexturedSphere = [&](const char *path) -> Model {
     Texture t = LoadTexture(path);
     GenTextureMipmaps(&t);
     SetTextureFilter(t, TEXTURE_FILTER_BILINEAR);
     SetTextureFilter(t, TEXTURE_FILTER_ANISOTROPIC_16X);
-    Mesh msh = GenMeshSphere(1, 16, 16);
+    Mesh msh = GenMeshSphere(1, 32, 32);
     Model m = LoadModelFromMesh(msh);
+    m.materials[0].shader = ctx.shader;
     m.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = t;
     return m;
   };
@@ -595,8 +617,8 @@ bool Update(Context &ctx) {
       const float force = -200.0f;
       const ID id{.v = uint32_t(cpos->index)};
       const auto delta = (toBtV3(cpos->pos) - toBtV3(cam.position)).normalize();
+      AddParticles(ctx, cpos->pos, cpos->normal, 5);
       if (!cpos->st) {
-        AddParticles(ctx, cpos->pos, cpos->normal, 50);
         if (id.t == 0) {
           auto *rb = ctx.cubes.at(id.i).rb;
           rb->setActivationState(ACTIVE_TAG);
@@ -640,7 +662,8 @@ bool Update(Context &ctx) {
       auto *rb = ctx.player;
       const btVector3 speedVec = fwd * toBtV3(move) + strafe * toBtV3(side);
       const btVector3 lv = rb->getLinearVelocity();
-      const btVector3 nlv = {speed * speedVec.x(), lv.y(), speed * speedVec.z()};
+      const btVector3 nlv = {speed * speedVec.x(), lv.y(),
+                             speed * speedVec.z()};
       const float r0 = 16.0f;
       const float r1 = lv.length2();
       const float rt = 1.0f / (r0 + r1);
@@ -688,16 +711,17 @@ bool Update(Context &ctx) {
     UpdateBullets(ctx);
 
     {
-      const Vector3 startPos = Vector3Add(cam.position, {0, -0.09, 0});
+      const Vector3 gunPos = GetCameraOffset(ctx, {0, -0.09, -0.15});
+      const Vector3 grapplePos = cam.position;
       const Vector3 dir =
           Vector3Normalize(Vector3Subtract(cam.target, cam.position));
 
       if (IsMouseButtonPressed(0)) {
-        ctx.bullets.push_back({startPos, dir, ctx.gtime});
+        ctx.bullets.push_back({gunPos, dir, ctx.gtime});
       }
 
       if (IsMouseButtonPressed(1)) {
-        ctx.grapple = Particle{cam.position, dir, ctx.gtime};
+        ctx.grapple = Particle{grapplePos, dir, ctx.gtime};
       }
     }
   } else {
@@ -721,10 +745,11 @@ Rectangle Inset(Rectangle r, float i = 2.0f) {
 void RenderView(Context &ctx, const Camera &cam) {
   if (ctx.grapple) {
     Vector3 pos{};
-    const Vector3 startPos = Vector3Add(cam.position, {0, -0.09, 0});
+    const Vector3 startPos = GetCameraOffset(ctx, {0, -0.09, 0.15});
     CheckRayCollision(ctx, std::get<Particle>(*ctx.grapple), GrappleSpeed,
                       &pos);
-    DrawCapsule(startPos, pos, 0.005f, 4, 4, WHITE);
+    DrawCapsule(startPos, pos, 0.005f, 4, 4, BLUE);
+    DrawSphere(pos, 0.02f, WHITE);
   }
 
 #if 0
@@ -772,6 +797,8 @@ void RenderView(Context &ctx, const Camera &cam) {
 }
 
 void RenderGui(Context &ctx) {
+  if (ctx.lockCursor)
+    return;
   const float o = 22.0f;
   const float y = GetScreenHeight() - o;
   const float w = GetScreenWidth();
@@ -808,6 +835,8 @@ void RenderParticles(Context &ctx) {
 }
 
 void RenderBullets(Context &ctx) {
+  Color col = YELLOW;
+  col.a = 90;
   for (const auto &b : ctx.bullets) {
     const float dt0 = ctx.pgtime - b.startTime;
     const float dt1 = ctx.gtime - b.startTime;
@@ -816,7 +845,7 @@ void RenderBullets(Context &ctx) {
         Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt0));
     const Vector3 to = Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt1));
     const float sz = 0.01f;
-    DrawCapsule(from, to, sz, 8, 4, {255, 255, 255, 90});
+    DrawCapsule(from, to, sz, 8, 4, col);
   }
 }
 
@@ -828,11 +857,13 @@ void RenderHUD(Context &ctx) {
     DrawRectangleRec({x - 1, y - 1, 3, 3}, WHITE);
   }
 
+#ifdef DEBUG
   char buffer[2048]{};
   const Camera cam = GetCamera(ctx);
   snprintf(buffer, sizeof(buffer), "%d fps\n(%.02f,%.02f,%.02f)", GetFPS(),
            cam.position.x, cam.position.y, cam.position.z);
   DrawText(buffer, 0, 0, 20, WHITE);
+#endif
 }
 
 void Render(Context &ctx) {
@@ -840,6 +871,7 @@ void Render(Context &ctx) {
   const Camera3D cam = GetCamera(ctx);
   BeginDrawing();
   {
+    BeginTextureMode(ctx.rt);
     ClearBackground(PINK);
     BeginMode3D(cam);
     {
@@ -850,6 +882,10 @@ void Render(Context &ctx) {
     EndMode3D();
     RenderGui(ctx);
     RenderHUD(ctx);
+    EndTextureMode();
+    const float w = ctx.W;
+    const float h = ctx.H;
+    DrawTexturePro(ctx.rt.texture, {0, 0, w, -h}, {0, 0, w, h}, {}, 0, WHITE);
   }
   EndDrawing();
 }
