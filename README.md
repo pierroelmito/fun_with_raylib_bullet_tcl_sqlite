@@ -1,6 +1,8 @@
 
 # fun_with_raylib_bullet_tcl_sqlite
-having fun with a toy project using raylib, bullet, tcl and sqlite
+Having fun with a toy project using raylib, bullet, tcl and sqlite.
+
+![Alt text](/screenshots/screen000.png?raw=true)
 
 ## Build and run
 * dependencies:
