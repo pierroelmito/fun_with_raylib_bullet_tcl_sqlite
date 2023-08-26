@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <set>
@@ -65,14 +66,21 @@ constexpr static const PhysicMat Box{0.6f, 0.0f, 0.0f, 0.0f};
 constexpr float BulletSpeed = 120.0f;
 constexpr float GrappleSpeed = 80.0f;
 
-struct Cube {
+struct StaCube {
+  Vector3 size{};
+  Vector3 position{};
+  Color col{WHITE};
+  uint32_t index{};
+};
+
+struct DynCube {
   Vector3 size{};
   Color col{WHITE};
   uint32_t index{};
   btRigidBody *rb{};
 };
 
-struct Sphere {
+struct DynSphere {
   float size{};
   Color col{WHITE};
   uint32_t index{};
@@ -142,8 +150,8 @@ struct Context {
   std::vector<std::string> history{};
   bool lockCursor{true};
   // render
-  // int W{1280}, H{720};
-  int W{640}, H{400};
+  int W{1280}, H{720};
+  // int W{640}, H{400};
   int FPS{60};
   int frame{};
   double pgtime{};
@@ -153,8 +161,10 @@ struct Context {
   std::vector<Model> models{};
   std::vector<Particle> particles{};
   std::vector<Particle> bullets{};
-  ObjectList<Cube> cubes;
-  ObjectList<Sphere> spheres;
+  ObjectList<DynCube> cubes;
+  ObjectList<DynSphere> spheres;
+  std::vector<StaCube> staticCubes{};
+  std::vector<btRigidBody *> staticBodies{};
 };
 
 using DynParams = std::tuple<float, Vector3>;
@@ -185,8 +195,8 @@ void CleanRigidBody(Context &ctx, btRigidBody *&rb) {
   rb = nullptr;
 }
 
-void CleanCube(Context &ctx, Cube &c) { CleanRigidBody(ctx, c.rb); }
-void CleanSphere(Context &ctx, Sphere &s) { CleanRigidBody(ctx, s.rb); }
+void CleanCube(Context &ctx, DynCube &c) { CleanRigidBody(ctx, c.rb); }
+void CleanSphere(Context &ctx, DynSphere &s) { CleanRigidBody(ctx, s.rb); }
 
 Vector3 GetCameraOffset(Context &ctx, Vector3 o) {
   btTransform bt;
@@ -292,8 +302,21 @@ btRigidBody *CreatePhysicShape(Context &ctx, btCollisionShape *collider_shape,
   return body;
 }
 
-void CreatePhysicCube(Context &ctx, uint32_t index, Cube &c, const Vector3 &pos,
-                      const Vector3 &rotation, const PhysicMat &pm,
+void CreatePhysicCube(Context &ctx, const Vector3 &pos, const Vector3 &size,
+                      const Vector3 &rotation, Color col, uint32_t mshIndex,
+                      const PhysicMat &pm,
+                      const std::optional<DynParams> &params = {}) {
+  const Vector3 halfSize = Vector3Scale(size, 0.5f);
+  btCollisionShape *collider_shape =
+      new btBoxShape(toBtV3(halfSize) + btVector3{pm.extent, 0.0f, pm.extent});
+  ctx.staticCubes.push_back({size, pos, col, mshIndex});
+  ctx.staticBodies.push_back(CreatePhysicShape(ctx, collider_shape, 0, ~0u, pos,
+                                               rotation, pm, params));
+}
+
+void CreatePhysicCube(Context &ctx, uint32_t index, DynCube &c,
+                      const Vector3 &pos, const Vector3 &rotation,
+                      const PhysicMat &pm,
                       const std::optional<DynParams> &params = {}) {
   const Vector3 halfSize = Vector3Scale(c.size, 0.5f);
   btCollisionShape *collider_shape =
@@ -302,7 +325,7 @@ void CreatePhysicCube(Context &ctx, uint32_t index, Cube &c, const Vector3 &pos,
                            params);
 }
 
-void CreatePhysicSphere(Context &ctx, uint32_t index, Sphere &s,
+void CreatePhysicSphere(Context &ctx, uint32_t index, DynSphere &s,
                         const Vector3 &pos, const PhysicMat &pm,
                         const std::optional<DynParams> &params = {}) {
   btCollisionShape *collider_shape = new btSphereShape(s.size);
@@ -310,34 +333,34 @@ void CreatePhysicSphere(Context &ctx, uint32_t index, Sphere &s,
                            params);
 }
 
-void LoadImgMap(Context &ctx) {
-  Image img = LoadImage("assets/map00.png");
+void LoadImgMap(Context &ctx, const char *path,
+                const std::function<bool(Color)> &isWall) {
+  Image img = LoadImage(path);
   const int floors = img.width / img.height;
+  const int stride = img.format == PIXELFORMAT_UNCOMPRESSED_R8G8B8 ? 3 : 4;
+
+  TraceLog(LOG_INFO, "img %dx%d, floors %d", img.width, img.height, floors);
 
   std::optional<Vector3> startPos{};
 
   uint8_t *const pixels = static_cast<uint8_t *>(img.data);
-  const float psz = 5.0f;
-  const float fh = 3.0f;
+  const float psz = 4.0f;
+  const float fh = 4.0f;
   const Vector3 szc{psz, fh, psz};
-
-  const auto isWall = [](Color c) -> bool {
-    return (c.r != 0 || c.g != 0 || c.b != 0);
-  };
 
   const auto GetMapAt = [&](int x, int y, int f) -> Color {
     if (x >= 0 && x <= img.height && y >= 0 && y <= img.height && f >= 0 &&
         f < floors) {
       const int o = y * img.width + (x + f * img.height);
-      const Color cc = GetPixelColor(pixels + 3 * o, img.format);
+      const Color cc = GetPixelColor(pixels + stride * o, img.format);
       return cc;
     }
-    return WHITE;
+    return {255, 255, 255, 0};
   };
 
   for (int f = -1; f < floors + 1; ++f) {
-    for (int y = 1; y < img.height - 1; ++y) {
-      for (int x = 1; x < img.height - 1; ++x) {
+    for (int y = 0; y < img.height; ++y) {
+      for (int x = 0; x < img.height; ++x) {
         const Color cc = GetMapAt(x, y, f);
         const Vector3 cpos{x * psz, (f + 0.5f) * fh, y * psz};
         if (!isWall(cc)) {
@@ -357,9 +380,7 @@ void LoadImgMap(Context &ctx) {
             if (!isWall(co)) {
               const int fc = f & 1;
               const Color col = RndCol(76 + fc * 30, 6);
-              ctx.cubes.push_back({szc, col, index}, [&](size_t i, Cube &c) {
-                CreatePhysicCube(ctx, i, c, cpos, {0, 0, 0}, Wall);
-              });
+              CreatePhysicCube(ctx, cpos, szc, {0, 0, 0}, col, index, Wall);
               break;
             }
           }
@@ -373,6 +394,18 @@ void LoadImgMap(Context &ctx) {
   }
 
   UnloadImage(img);
+}
+
+void LoadLayersMap(Context &ctx) {
+  const auto isWall = [](Color c) -> bool {
+    return (c.r != 0 || c.g != 0 || c.b != 0);
+  };
+  return LoadImgMap(ctx, "assets/map00.png", isWall);
+}
+
+void LoadSlicesMap(Context &ctx) {
+  const auto isWall = [](Color c) -> bool { return (c.a < 128); };
+  return LoadImgMap(ctx, "assets/map01.png", isWall);
 }
 
 void LoadDbMap(Context &ctx, Vector3 offset) {
@@ -403,7 +436,7 @@ void LoadDbMap(Context &ctx, Vector3 offset) {
       }
       const Vector3 pos{px + offset.x, py + 0.5f * sy + offset.y,
                         pz + offset.z};
-      ctx.cubes.push_back({{sx, sy, sz}, c, 2}, [&](size_t i, Cube &c) {
+      ctx.cubes.push_back({{sx, sy, sz}, c, 2}, [&](size_t i, DynCube &c) {
         CreatePhysicCube(ctx, i, c, pos, {0, 0, 0}, Wall);
       });
     }
@@ -484,7 +517,8 @@ void Init(Context &ctx) {
   InitRender(ctx);
   InitPhysics(ctx);
   LoadDbMap(ctx, {90, 0.3, 112});
-  LoadImgMap(ctx);
+  //LoadLayersMap(ctx);
+  LoadSlicesMap(ctx);
 }
 
 // ================================================================================
@@ -495,6 +529,7 @@ void ReleaseRender(Context &ctx) {
   for (Model &m : ctx.models)
     UnloadModel(m);
   ctx.models.clear();
+  UnloadShader(ctx.shader);
   CloseWindow();
 }
 
@@ -692,7 +727,7 @@ bool Update(Context &ctx) {
       const Vector3 dir = Vector3Scale(
           Vector3Normalize(Vector3Subtract(cam.target, cam.position)), 20.0f);
       const Color col = RndCol(146, 100);
-      ctx.cubes.push_back({{sz, sz, sz}, col, 0}, [&](size_t i, Cube &c) {
+      ctx.cubes.push_back({{sz, sz, sz}, col, 0}, [&](size_t i, DynCube &c) {
         CreatePhysicCube(ctx, i, c, cam.target, {1, 0, 0}, Box,
                          DynParams{1.0f, dir});
       });
@@ -703,7 +738,7 @@ bool Update(Context &ctx) {
       const Vector3 dir = Vector3Scale(
           Vector3Normalize(Vector3Subtract(cam.target, cam.position)), 20.0f);
       const Color col = RndCol(146, 100);
-      ctx.spheres.push_back({sz, col, 1}, [&](size_t i, Sphere &s) {
+      ctx.spheres.push_back({sz, col, 1}, [&](size_t i, DynSphere &s) {
         CreatePhysicSphere(ctx, i, s, cam.target, Box, DynParams{1.0f, dir});
       });
     }
@@ -768,7 +803,11 @@ void RenderView(Context &ctx, const Camera &cam) {
   }
 #endif
 
-  ctx.cubes.forEach([&](size_t i, Cube &c) {
+  for (const auto &c : ctx.staticCubes) {
+    DrawModelEx(ctx.models[c.index], c.position, {0, 1, 0}, 0, c.size, c.col);
+  }
+
+  ctx.cubes.forEach([&](size_t i, DynCube &c) {
     btTransform bt;
     c.rb->getMotionState()->getWorldTransform(bt);
     const auto p = bt.getOrigin();
@@ -781,7 +820,7 @@ void RenderView(Context &ctx, const Camera &cam) {
     DrawModelEx(ctx.models[c.index], pos, axis, angle, c.size, c.col);
   });
 
-  ctx.spheres.forEach([&](size_t i, Sphere &s) {
+  ctx.spheres.forEach([&](size_t i, DynSphere &s) {
     btTransform bt;
     s.rb->getMotionState()->getWorldTransform(bt);
     const auto p = bt.getOrigin();
