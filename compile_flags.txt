@@ -1,3 +1,4 @@
 --std=c++20
 -Wall
 -I/usr/include/bullet
+-Ic:\msys64\mingw64\include\bullet
