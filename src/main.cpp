@@ -142,8 +142,8 @@ struct Context {
   std::vector<std::string> history{};
   bool lockCursor{true};
   // render
-  // int W{1280}, H{720};
-  int W{640}, H{400};
+  int W{1280}, H{720};
+  // int W{640}, H{400};
   int FPS{60};
   int frame{};
   double pgtime{};
@@ -711,16 +711,14 @@ bool Update(Context &ctx) {
     UpdateBullets(ctx);
 
     {
-      const Vector3 gunPos = GetCameraOffset(ctx, {0, -0.09, -0.15});
-      const Vector3 grapplePos = cam.position;
       const Vector3 dir =
           Vector3Normalize(Vector3Subtract(cam.target, cam.position));
-
       if (IsMouseButtonPressed(0)) {
+        const Vector3 gunPos = GetCameraOffset(ctx, {0, -0.09, -0.15});
         ctx.bullets.push_back({gunPos, dir, ctx.gtime});
       }
-
       if (IsMouseButtonPressed(1)) {
+        const Vector3 grapplePos = cam.position;
         ctx.grapple = Particle{grapplePos, dir, ctx.gtime};
       }
     }
