@@ -20,5 +20,5 @@ void main()
 	finalColor = texelColor*colDiffuse*fragColor;
 	finalColor.rgb *= l;
 	float fog = exp(-0.009 * length(fragViewPos));
-	finalColor.rgb = fog * finalColor.rgb + (1 - fog) * vec3(0.5, 0.5, 0.8);
+	finalColor.rgb = mix(vec3(0.5, 0.5, 0.8), finalColor.rgb, fog);
 }

@@ -172,7 +172,8 @@ struct Context {
   int frame{};
   double pgtime{};
   double gtime{};
-  Shader shader{};
+  Shader basicShader{};
+  Shader postFxShader{};
   RenderTexture rt{};
   std::vector<Model> models{};
   std::vector<Particle> particles{};
@@ -492,8 +493,9 @@ void InitRender(Context &ctx) {
   SetExitKey(0);
 
   ctx.rt = LoadRenderTexture(ctx.W, ctx.H);
-  ctx.shader =
+  ctx.basicShader =
       LoadShader("assets/shaders/default.vs", "assets/shaders/default.fs");
+  ctx.postFxShader = LoadShader(nullptr, "assets/shaders/postfx.fs");
 
   const auto makeTexturedCube = [&](const char *path) -> Model {
     Texture t = LoadTexture(path);
@@ -502,7 +504,7 @@ void InitRender(Context &ctx) {
     SetTextureFilter(t, TEXTURE_FILTER_ANISOTROPIC_16X);
     Mesh msh = GenMeshCube(1, 1, 1);
     Model m = LoadModelFromMesh(msh);
-    m.materials[0].shader = ctx.shader;
+    m.materials[0].shader = ctx.basicShader;
     m.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = t;
     return m;
   };
@@ -514,7 +516,7 @@ void InitRender(Context &ctx) {
     SetTextureFilter(t, TEXTURE_FILTER_ANISOTROPIC_16X);
     Mesh msh = GenMeshSphere(1, 32, 32);
     Model m = LoadModelFromMesh(msh);
-    m.materials[0].shader = ctx.shader;
+    m.materials[0].shader = ctx.basicShader;
     m.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = t;
     return m;
   };
@@ -557,7 +559,8 @@ void ReleaseRender(Context &ctx) {
   for (Model &m : ctx.models)
     UnloadModel(m);
   ctx.models.clear();
-  UnloadShader(ctx.shader);
+  UnloadShader(ctx.basicShader);
+  UnloadShader(ctx.postFxShader);
   CloseWindow();
 }
 
@@ -973,7 +976,11 @@ void Render(Context &ctx) {
     EndTextureMode();
     const float w = ctx.W;
     const float h = ctx.H;
-    DrawTexturePro(ctx.rt.texture, {0, 0, w, -h}, {0, 0, w, h}, {}, 0, WHITE);
+    BeginShaderMode(ctx.postFxShader);
+    {
+      DrawTexturePro(ctx.rt.texture, {0, 0, w, -h}, {0, 0, w, h}, {}, 0, WHITE);
+    }
+    EndShaderMode();
   }
   EndDrawing();
 }
