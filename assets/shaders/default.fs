@@ -3,6 +3,7 @@
 in vec2 fragTexCoord;
 in vec4 fragColor;
 in vec3 fragNormal;
+in vec3 fragViewPos;
 
 out vec4 finalColor;
 
@@ -18,5 +19,6 @@ void main()
 	float l = 0.5 + 0.5 * bl;
 	finalColor = texelColor*colDiffuse*fragColor;
 	finalColor.rgb *= l;
+	float fog = exp(-0.009 * length(fragViewPos));
+	finalColor.rgb = fog * finalColor.rgb + (1 - fog) * vec3(0.5, 0.5, 0.8);
 }
-
