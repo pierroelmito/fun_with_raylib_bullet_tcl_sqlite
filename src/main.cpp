@@ -2,6 +2,7 @@
 // STL
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -35,6 +36,11 @@ inline Vector3 toRlV3(btVector3 v) {
   return Vector3{v.getX(), v.getY(), v.getZ()};
 }
 
+inline Vector3 Reflect(Vector3 in, Vector3 n) {
+  const float v = Vector3DotProduct(n, in);
+  return Vector3Add(in, Vector3Scale(n, -2.0f * v));
+}
+
 inline Color RndCol(int minr, int dr) {
   return Color{uint8_t(GetRandomValue(minr, minr + dr)),
                uint8_t(GetRandomValue(minr, minr + dr)),
@@ -48,6 +54,14 @@ struct ID {
       uint32_t i : 30;
       uint32_t t : 2;
     };
+  };
+};
+
+struct RbGroups {
+  enum Type {
+    PLAYER = (1 << 11),
+    WALL = (1 << 12),
+    OBJECT = (1 << 13),
   };
 };
 
@@ -260,15 +274,17 @@ void CreatePlayerCapsule(Context &ctx, Vector3 pos) {
   rb_info.m_angularDamping = 0.0f;
 
   btRigidBody *body = new btRigidBody(rb_info);
+  ctx.dynamics_world->addRigidBody(body, RbGroups::PLAYER,
+                                   btBroadphaseProxy::AllFilter);
   body->setActivationState(DISABLE_DEACTIVATION);
-  ctx.dynamics_world->addRigidBody(body);
   ctx.player = body;
 
   ctx.startPos = Vector3Subtract(pos, {0, -0.5, 0});
 }
 
-btRigidBody *CreatePhysicShape(Context &ctx, btCollisionShape *collider_shape,
-                               uint32_t t, uint32_t index, const Vector3 &pos,
+btRigidBody *CreatePhysicShape(Context &ctx, int group,
+                               btCollisionShape *collider_shape, uint32_t t,
+                               uint32_t index, const Vector3 &pos,
                                const Vector3 &rotation, const PhysicMat &pm,
                                const std::optional<DynParams> &params = {}) {
   const btTransform transform = MakeTransform(pos, rotation);
@@ -295,9 +311,9 @@ btRigidBody *CreatePhysicShape(Context &ctx, btCollisionShape *collider_shape,
   rb_info.m_angularDamping = 0.4f;
 
   btRigidBody *body = new btRigidBody(rb_info);
+  ctx.dynamics_world->addRigidBody(body, group, btBroadphaseProxy::AllFilter);
   body->setUserIndex(id.v);
   body->setLinearVelocity(speed);
-  ctx.dynamics_world->addRigidBody(body);
 
   return body;
 }
@@ -310,8 +326,8 @@ void CreatePhysicCube(Context &ctx, const Vector3 &pos, const Vector3 &size,
   btCollisionShape *collider_shape =
       new btBoxShape(toBtV3(halfSize) + btVector3{pm.extent, 0.0f, pm.extent});
   ctx.staticCubes.push_back({size, pos, col, mshIndex});
-  ctx.staticBodies.push_back(CreatePhysicShape(ctx, collider_shape, 0, ~0u, pos,
-                                               rotation, pm, params));
+  ctx.staticBodies.push_back(CreatePhysicShape(
+      ctx, RbGroups::WALL, collider_shape, 0, ~0u, pos, rotation, pm, params));
 }
 
 void CreatePhysicCube(Context &ctx, uint32_t index, DynCube &c,
@@ -321,20 +337,21 @@ void CreatePhysicCube(Context &ctx, uint32_t index, DynCube &c,
   const Vector3 halfSize = Vector3Scale(c.size, 0.5f);
   btCollisionShape *collider_shape =
       new btBoxShape(toBtV3(halfSize) + btVector3{pm.extent, 0.0f, pm.extent});
-  c.rb = CreatePhysicShape(ctx, collider_shape, 0, index, pos, rotation, pm,
-                           params);
+  c.rb = CreatePhysicShape(ctx, RbGroups::OBJECT, collider_shape, 0, index, pos,
+                           rotation, pm, params);
 }
 
 void CreatePhysicSphere(Context &ctx, uint32_t index, DynSphere &s,
                         const Vector3 &pos, const PhysicMat &pm,
                         const std::optional<DynParams> &params = {}) {
   btCollisionShape *collider_shape = new btSphereShape(s.size);
-  s.rb = CreatePhysicShape(ctx, collider_shape, 1, index, pos, {0, 0, 0}, pm,
-                           params);
+  s.rb = CreatePhysicShape(ctx, RbGroups::OBJECT, collider_shape, 1, index, pos,
+                           {0, 0, 0}, pm, params);
 }
 
 void LoadImgMap(Context &ctx, const char *path,
-                const std::function<bool(Color)> &isWall) {
+                const std::function<bool(Color)> &isWall,
+                const std::function<Color(Color, int)> &makeColor) {
   Image img = LoadImage(path);
   const int floors = img.width / img.height;
   const int stride = img.format == PIXELFORMAT_UNCOMPRESSED_R8G8B8 ? 3 : 4;
@@ -378,8 +395,7 @@ void LoadImgMap(Context &ctx, const char *path,
             const Color co = GetMapAt(x + offsets[i][0], y + offsets[i][1],
                                       f + offsets[i][2]);
             if (!isWall(co)) {
-              const int fc = f & 1;
-              const Color col = RndCol(76 + fc * 30, 6);
+              const Color col = makeColor(cc, f);
               CreatePhysicCube(ctx, cpos, szc, {0, 0, 0}, col, index, Wall);
               break;
             }
@@ -400,12 +416,20 @@ void LoadLayersMap(Context &ctx) {
   const auto isWall = [](Color c) -> bool {
     return (c.r != 0 || c.g != 0 || c.b != 0);
   };
-  return LoadImgMap(ctx, "assets/map00.png", isWall);
+  const auto makeColor = [](Color c, int f) {
+    const int fc = f & 1;
+    return RndCol(76 + fc * 30, 6);
+  };
+  return LoadImgMap(ctx, "assets/map00.png", isWall, makeColor);
 }
 
 void LoadSlicesMap(Context &ctx) {
   const auto isWall = [](Color c) -> bool { return (c.a < 128); };
-  return LoadImgMap(ctx, "assets/map01.png", isWall);
+  const auto makeColor = [](Color c, int f) {
+    const int fc = f & 1;
+    return RndCol(76 + fc * 30, 6);
+  };
+  return LoadImgMap(ctx, "assets/map01.png", isWall, makeColor);
 }
 
 void LoadDbMap(Context &ctx, Vector3 offset) {
@@ -493,10 +517,12 @@ void InitRender(Context &ctx) {
     return m;
   };
 
-  ctx.models.push_back(makeTexturedCube("assets/crate.png"));
-  ctx.models.push_back(makeTexturedSphere("assets/crate.png"));
-  ctx.models.push_back(makeTexturedCube("assets/block00.png"));
-  ctx.models.push_back(makeTexturedCube("assets/block01.png"));
+  ctx.models = {
+      makeTexturedCube("assets/crate.png"),
+      makeTexturedSphere("assets/crate.png"),
+      makeTexturedCube("assets/block00.png"),
+      makeTexturedCube("assets/block01.png"),
+  };
 }
 
 void InitPhysics(Context &ctx) {
@@ -517,7 +543,7 @@ void Init(Context &ctx) {
   InitRender(ctx);
   InitPhysics(ctx);
   LoadDbMap(ctx, {90, 0.3, 112});
-  //LoadLayersMap(ctx);
+  // LoadLayersMap(ctx);
   LoadSlicesMap(ctx);
 }
 
@@ -560,11 +586,12 @@ struct CResult {
   bool st{};
 };
 
-std::optional<CResult> CheckRayCollision(Context &ctx, Vector3 from,
-                                         Vector3 to) {
+std::optional<CResult> CheckRayCollision(Context &ctx, Vector3 from, Vector3 to,
+                                         int skipFlags = 0) {
   const btVector3 bf = toBtV3(from);
   const btVector3 bt = toBtV3(to);
   btCollisionWorld::ClosestRayResultCallback cb{bf, bt};
+  cb.m_collisionFilterMask = cb.m_collisionFilterMask & ~skipFlags;
   ctx.dynamics_world->rayTest(bf, bt, cb);
   if (!cb.hasHit())
     return {};
@@ -602,7 +629,8 @@ bool MoveBullet(Context &ctx, const Particle &b) {
   if (!cpos)
     return false;
 
-  AddParticles(ctx, cpos->pos, cpos->normal, 10);
+  const Vector3 pdir = Reflect(Vector3Normalize(b.dir), cpos->normal);
+  AddParticles(ctx, cpos->pos, pdir, 10);
 
   if (!cpos->st) {
     const ID id{.v = uint32_t(cpos->index)};
@@ -671,9 +699,11 @@ bool Update(Context &ctx) {
   }
 
   if (ctx.lockCursor) {
+    const float maxA = 0.99f * M_PI_2;
     const float camSpeed = 0.003f;
     ctx.camAngles = Vector2Add(
         ctx.camAngles, Vector2Multiply(GetMouseDelta(), {-camSpeed, camSpeed}));
+    ctx.camAngles.y = std::max(-maxA, std::min(maxA, ctx.camAngles.y));
 
     {
       const bool sprint = IsKeyDown(KEY_LEFT_SHIFT);
@@ -712,10 +742,10 @@ bool Update(Context &ctx) {
       const auto from = cam.position;
       const btVector3 bf{from.x, from.y, from.z};
       const btVector3 bt = bf + btVector3{0, -0.9, 0};
-      btCollisionWorld::AllHitsRayResultCallback cb{bf, bt};
+      btCollisionWorld::ClosestRayResultCallback cb{bf, bt};
+      cb.m_collisionFilterMask = cb.m_collisionFilterMask & ~RbGroups::PLAYER;
       ctx.dynamics_world->rayTest(bf, bt, cb);
-      cb.m_collisionObjects.remove(ctx.player);
-      if (cb.m_collisionObjects.size() > 0) {
+      if (cb.m_collisionObject != nullptr) {
         // TraceLog(LOG_INFO, "jump");
         auto *rb = ctx.player;
         rb->applyCentralImpulse({0, 30, 0});
@@ -860,7 +890,7 @@ void RenderParticles(Context &ctx) {
             const float speed = 3.0f;
             const float r = dt / maxt;
             const Vector3 pos = Vector3Add(
-                Vector3{0.0f, -dt * dt * 10.0f, 0.0f},
+                Vector3{0.0f, -dt * dt * 2.0f, 0.0f},
                 Vector3Add(p.startPos, Vector3Scale(p.dir, speed * dt)));
             const uint8_t alpha =
                 static_cast<uint8_t>(std::min(255.0f, 255.0f * (1.0f - r)));
