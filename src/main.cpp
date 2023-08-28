@@ -609,7 +609,7 @@ std::optional<CResult> CheckRayCollision(Context &ctx, const Particle &b,
   const Vector3 to = Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt1));
   if (pos)
     *pos = to;
-  return CheckRayCollision(ctx, from, to);
+  return CheckRayCollision(ctx, from, to, RbGroups::PLAYER);
 }
 
 void AddParticles(Context &ctx, Vector3 pos, Vector3 normal, int count) {
@@ -805,31 +805,33 @@ Rectangle Inset(Rectangle r, float i = 2.0f) {
   return {r.x + i, r.y + i, r.width - 2.0f * i, r.height - 2.0f * i};
 }
 
+void DrawRope(Context &ctx, Vector3 from0, Vector3 to0, Vector3 from1,
+              Vector3 to1, int segments) {
+  const int sc = 4;
+  const float rw = 0.005f;
+  const float sr = 0.005f;
+  for (int i = 1; i <= segments; ++i) {
+    const float r0 = float(i - 1) / segments;
+    const float r1 = float(i) / segments;
+    const Vector3 nf0 = Vector3Lerp(from0, from1, r0);
+    const Vector3 nf1 = Vector3Lerp(from0, from1, r1);
+    const Vector3 nt0 = Vector3Lerp(to0, to1, r0);
+    const Vector3 nt1 = Vector3Lerp(to0, to1, r1);
+    const Vector3 sp0 = Vector3Lerp(nf0, nt0, 1 - r0);
+    const Vector3 sp1 = Vector3Lerp(nf1, nt1, 1 - r1);
+    DrawCapsule(sp0, sp1, rw, sc, sc, BLUE);
+  }
+  DrawSphere(to1, sr, WHITE);
+}
+
 void RenderView(Context &ctx, const Camera &cam) {
   if (ctx.grapple) {
     Vector3 pos{};
     const Vector3 startPos = GetCameraOffset(ctx, {0, -0.09, 0.15});
-    CheckRayCollision(ctx, std::get<Particle>(*ctx.grapple), GrappleSpeed,
-                      &pos);
-    DrawCapsule(startPos, pos, 0.005f, 4, 4, BLUE);
-    DrawSphere(pos, 0.02f, WHITE);
+    const Particle &grapple = std::get<Particle>(*ctx.grapple);
+    CheckRayCollision(ctx, grapple, GrappleSpeed, &pos);
+    DrawRope(ctx, grapple.startPos, pos, startPos, pos, 16);
   }
-
-#if 0
-  {
-    btTransform bt;
-    ctx.player->getMotionState()->getWorldTransform(bt);
-    const auto p = bt.getOrigin();
-    const auto quat = bt.getRotation();
-    const auto btaxis = quat.getAxis();
-    const Vector3 pos = toRlV3(p);
-    const Vector3 axis = toRlV3(btaxis);
-    const float radian_scale = 57.296;
-    const float angle = float(quat.getAngle()) * radian_scale;
-    const float sz = 0.1f;
-    DrawModelEx(ctx.models[0], pos, axis, angle, Vector3{sz, sz, sz}, WHITE);
-  }
-#endif
 
   for (const auto &c : ctx.staticCubes) {
     DrawModelEx(ctx.models[c.index], c.position, {0, 1, 0}, 0, c.size, c.col);
