@@ -105,6 +105,7 @@ struct Particle {
   Vector3 startPos{};
   Vector3 dir;
   double startTime{};
+  int ptype{};
 };
 
 template <class T> class ObjectList {
@@ -156,6 +157,7 @@ struct Context {
   // player
   Vector3 startPos{};
   Vector2 camAngles{};
+  Vector2 deltaCamAngles{};
   btRigidBody *player{};
   std::optional<std::variant<Particle>> grapple;
   // GUI
@@ -232,9 +234,9 @@ Camera3D GetCamera(Context &ctx) {
   ctx.player->getMotionState()->getWorldTransform(bt);
   const auto p = bt.getOrigin();
   const Vector3 pos = toRlV3(p + btVector3{0, 0.3, 0});
-  const Vector3 delta{cosf(ctx.camAngles.y) * sinf(ctx.camAngles.x),
-                      sinf(ctx.camAngles.y),
-                      cosf(ctx.camAngles.y) * cosf(ctx.camAngles.x)};
+  const Vector2 angles = Vector2Add(ctx.camAngles, ctx.deltaCamAngles);
+  const Vector3 delta{cosf(angles.y) * sinf(angles.x), sinf(angles.y),
+                      cosf(angles.y) * cosf(angles.x)};
 
   r.fovy = 30.0f;
   r.up = {0, 1, 0};
@@ -612,15 +614,17 @@ std::optional<CResult> CheckRayCollision(Context &ctx, const Particle &b,
   return CheckRayCollision(ctx, from, to, RbGroups::PLAYER);
 }
 
-void AddParticles(Context &ctx, Vector3 pos, Vector3 normal, int count) {
+void AddParticles(Context &ctx, Vector3 pos, Vector3 normal, float radius,
+                  int ptype, int count) {
   for (int i = 0; i < count; ++i) {
     const float dx = float(GetRandomValue(-1000, 1000)) / 1000.0f;
     const float dy = float(GetRandomValue(-1000, 1000)) / 1000.0f;
     const float dz = float(GetRandomValue(-1000, 1000)) / 1000.0f;
     ctx.particles.push_back(
         {pos,
-         Vector3Add(normal, Vector3Scale(Vector3Normalize({dx, dy, dz}), 0.5f)),
-         ctx.gtime});
+         Vector3Add(normal,
+                    Vector3Scale(Vector3Normalize({dx, dy, dz}), radius)),
+         ctx.gtime, ptype});
   }
 }
 
@@ -630,7 +634,7 @@ bool MoveBullet(Context &ctx, const Particle &b) {
     return false;
 
   const Vector3 pdir = Reflect(Vector3Normalize(b.dir), cpos->normal);
-  AddParticles(ctx, cpos->pos, pdir, 10);
+  AddParticles(ctx, cpos->pos, pdir, 0.5f, 0, 10);
 
   if (!cpos->st) {
     const ID id{.v = uint32_t(cpos->index)};
@@ -660,6 +664,7 @@ bool Update(Context &ctx) {
   const bool esc = IsKeyPressed(KEY_ESCAPE);
   const bool quit = ctx.lockCursor && esc;
 
+  ctx.deltaCamAngles = Vector2Scale(ctx.deltaCamAngles, 0.95f);
   ctx.pgtime = ctx.gtime;
   ctx.gtime += 1.0 / float(ctx.FPS);
 
@@ -674,13 +679,15 @@ bool Update(Context &ctx) {
   Camera3D cam = GetCamera(ctx);
 
   if (ctx.grapple) {
-    auto cpos =
-        CheckRayCollision(ctx, std::get<Particle>(*ctx.grapple), GrappleSpeed);
+    const Particle &grapple = std::get<Particle>(*ctx.grapple);
+    Vector3 pos{};
+    auto cpos = CheckRayCollision(ctx, grapple, GrappleSpeed, &pos);
+    AddParticles(ctx, pos, grapple.dir, 0.1f, 1, 3);
     if (cpos) {
       const float force = -200.0f;
       const ID id{.v = uint32_t(cpos->index)};
       const auto delta = (toBtV3(cpos->pos) - toBtV3(cam.position)).normalize();
-      AddParticles(ctx, cpos->pos, cpos->normal, 5);
+      AddParticles(ctx, cpos->pos, cpos->normal, 0.5f, 1, 5);
       if (!cpos->st) {
         if (id.t == 0) {
           auto *rb = ctx.cubes.at(id.i).rb;
@@ -781,6 +788,9 @@ bool Update(Context &ctx) {
       if (IsMouseButtonPressed(0)) {
         const Vector3 gunPos = GetCameraOffset(ctx, {0, -0.09, -0.15});
         ctx.bullets.push_back({gunPos, dir, ctx.gtime});
+        // shoot recoil
+        ctx.deltaCamAngles.y -= 0.03f;
+        ctx.deltaCamAngles.x += float(GetRandomValue(-10, 10)) / 2000.0f;
       }
       if (IsMouseButtonPressed(1)) {
         const Vector3 grapplePos = cam.position;
@@ -881,6 +891,14 @@ void RenderGui(Context &ctx) {
 }
 
 void RenderParticles(Context &ctx) {
+  const Color ctable[2] = {
+      Color{253, 249, 0, 255},
+      BLUE,
+  };
+  const float sztable[2] = {
+      0.05f,
+      0.01f,
+  };
   ctx.particles.erase(
       std::remove_if(
           ctx.particles.begin(), ctx.particles.end(),
@@ -896,8 +914,9 @@ void RenderParticles(Context &ctx) {
                 Vector3Add(p.startPos, Vector3Scale(p.dir, speed * dt)));
             const uint8_t alpha =
                 static_cast<uint8_t>(std::min(255.0f, 255.0f * (1.0f - r)));
-            const float sz = 0.05f * (1 + r);
-            DrawCube(pos, sz, sz, sz, Color{253, 249, 0, alpha});
+            const float sz = sztable[p.ptype] * (1 + r);
+            const Color bc = ctable[p.ptype];
+            DrawCube(pos, sz, sz, sz, Color{bc.r, bc.g, bc.b, alpha});
             return false;
           }),
       ctx.particles.end());
