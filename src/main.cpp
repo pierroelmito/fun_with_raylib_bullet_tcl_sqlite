@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -145,21 +146,36 @@ public:
   }
 };
 
-struct Context {
-  // script
-  Tcl_Interp *tcl{};
-  // physics
+struct GameMap {
   btDefaultCollisionConfiguration *collision_configuration{};
   btCollisionDispatcher *dispatcher{};
   btBroadphaseInterface *overlapping_pair_cache{};
   btSequentialImpulseConstraintSolver *solver{};
   btDiscreteDynamicsWorld *dynamics_world{};
-  // player
+  std::vector<Particle> particles{};
+  std::vector<Particle> bullets{};
+  ObjectList<DynCube> cubes;
+  ObjectList<DynSphere> spheres;
+  std::vector<StaCube> staticCubes{};
+  std::vector<btRigidBody *> staticBodies{};
+};
+
+struct Player {
   Vector3 startPos{};
   Vector2 camAngles{};
   Vector2 deltaCamAngles{};
   btRigidBody *player{};
+  std::shared_ptr<GameMap> map{};
   std::optional<std::variant<Particle>> grapple;
+};
+
+struct Context {
+  // script
+  Tcl_Interp *tcl{};
+  // map
+  std::map<std::string, std::shared_ptr<GameMap>> gameMaps{};
+  // player
+  Player player{};
   // GUI
   char commandBuffer[1024]{};
   std::string command{};
@@ -176,12 +192,6 @@ struct Context {
   Shader postFxShader{};
   RenderTexture rt{};
   std::vector<Model> models{};
-  std::vector<Particle> particles{};
-  std::vector<Particle> bullets{};
-  ObjectList<DynCube> cubes;
-  ObjectList<DynSphere> spheres;
-  std::vector<StaCube> staticCubes{};
-  std::vector<btRigidBody *> staticBodies{};
 };
 
 using DynParams = std::tuple<float, Vector3>;
@@ -204,23 +214,27 @@ void ExecCommand(Context &ctx, const std::string &cmd) {
   }
 }
 
-void CleanRigidBody(Context &ctx, btRigidBody *&rb) {
-  ctx.dynamics_world->removeRigidBody(rb);
+void CleanRigidBody(Context &ctx, GameMap &map, btRigidBody *&rb) {
+  map.dynamics_world->removeRigidBody(rb);
   delete rb->getCollisionShape();
   delete rb->getMotionState();
   delete rb;
   rb = nullptr;
 }
 
-void CleanCube(Context &ctx, DynCube &c) { CleanRigidBody(ctx, c.rb); }
-void CleanSphere(Context &ctx, DynSphere &s) { CleanRigidBody(ctx, s.rb); }
+void CleanCube(Context &ctx, GameMap &map, DynCube &c) {
+  CleanRigidBody(ctx, map, c.rb);
+}
+void CleanSphere(Context &ctx, GameMap &map, DynSphere &s) {
+  CleanRigidBody(ctx, map, s.rb);
+}
 
-Vector3 GetCameraOffset(Context &ctx, Vector3 o) {
+Vector3 GetCameraOffset(Context &ctx, Player &player, Vector3 o) {
   btTransform bt;
-  ctx.player->getMotionState()->getWorldTransform(bt);
+  player.player->getMotionState()->getWorldTransform(bt);
   const auto p = bt.getOrigin();
   const Vector3 pos = toRlV3(p + btVector3{0, 0.3, 0});
-  const Vector3 d{sinf(ctx.camAngles.x), 0, cosf(ctx.camAngles.x)};
+  const Vector3 d{sinf(player.camAngles.x), 0, cosf(player.camAngles.x)};
   const Vector3 n{-d.z, 0, d.x};
   const Vector3 v0 = Vector3Scale(d, o.x);
   const Vector3 v1 = Vector3Scale({0, 1, 0}, o.y);
@@ -228,14 +242,14 @@ Vector3 GetCameraOffset(Context &ctx, Vector3 o) {
   return Vector3Add(pos, Vector3Add(Vector3Add(v0, v1), v2));
 }
 
-Camera3D GetCamera(Context &ctx) {
+Camera3D GetCamera(Context &ctx, Player &player) {
   Camera3D r{};
 
   btTransform bt;
-  ctx.player->getMotionState()->getWorldTransform(bt);
+  player.player->getMotionState()->getWorldTransform(bt);
   const auto p = bt.getOrigin();
   const Vector3 pos = toRlV3(p + btVector3{0, 0.3, 0});
-  const Vector2 angles = Vector2Add(ctx.camAngles, ctx.deltaCamAngles);
+  const Vector2 angles = Vector2Add(player.camAngles, player.deltaCamAngles);
   const Vector3 delta{cosf(angles.y) * sinf(angles.x), sinf(angles.y),
                       cosf(angles.y) * cosf(angles.x)};
 
@@ -258,7 +272,7 @@ btTransform MakeTransform(const Vector3 &pos, const Vector3 &rotation) {
   return transform;
 }
 
-void CreatePlayerCapsule(Context &ctx, Vector3 pos) {
+void CreatePlayerCapsule(Context &ctx, Player &player, Vector3 pos) {
   btCapsuleShape *cs = new btCapsuleShape(0.4f, 0.2f);
 
   const btTransform transform = MakeTransform(pos, {0, 0, 0});
@@ -277,15 +291,25 @@ void CreatePlayerCapsule(Context &ctx, Vector3 pos) {
   rb_info.m_angularDamping = 0.0f;
 
   btRigidBody *body = new btRigidBody(rb_info);
-  ctx.dynamics_world->addRigidBody(body, RbGroups::PLAYER,
-                                   btBroadphaseProxy::AllFilter);
+  std::shared_ptr<GameMap> map = ctx.gameMaps[""];
+  map->dynamics_world->addRigidBody(body, RbGroups::PLAYER,
+                                    btBroadphaseProxy::AllFilter);
   body->setActivationState(DISABLE_DEACTIVATION);
-  ctx.player = body;
-
-  ctx.startPos = Vector3Subtract(pos, {0, -0.5, 0});
+  player.player = body;
+  player.startPos = pos;
 }
 
-btRigidBody *CreatePhysicShape(Context &ctx, int group,
+void TeleportPlayer(Context &ctx, Player &player, Vector3 pos) {
+  btTransform t{};
+  t.setOrigin(toBtV3(pos));
+  auto *rb = player.player;
+  rb->setWorldTransform(t);
+  rb->setLinearVelocity({0, 0, 0});
+  rb->setActivationState(DISABLE_DEACTIVATION);
+  rb->clearForces();
+}
+
+btRigidBody *CreatePhysicShape(Context &ctx, GameMap &map, int group,
                                btCollisionShape *collider_shape, uint32_t t,
                                uint32_t index, const Vector3 &pos,
                                const Vector3 &rotation, const PhysicMat &pm,
@@ -314,45 +338,57 @@ btRigidBody *CreatePhysicShape(Context &ctx, int group,
   rb_info.m_angularDamping = 0.4f;
 
   btRigidBody *body = new btRigidBody(rb_info);
-  ctx.dynamics_world->addRigidBody(body, group, btBroadphaseProxy::AllFilter);
+  map.dynamics_world->addRigidBody(body, group, btBroadphaseProxy::AllFilter);
   body->setUserIndex(id.v);
   body->setLinearVelocity(speed);
 
   return body;
 }
 
-void CreatePhysicCube(Context &ctx, const Vector3 &pos, const Vector3 &size,
-                      const Vector3 &rotation, Color col, uint32_t mshIndex,
-                      const PhysicMat &pm,
+void CreatePhysicCube(Context &ctx, GameMap &map, const Vector3 &pos,
+                      const Vector3 &size, const Vector3 &rotation, Color col,
+                      uint32_t mshIndex, const PhysicMat &pm,
                       const std::optional<DynParams> &params = {}) {
   const Vector3 halfSize = Vector3Scale(size, 0.5f);
   btCollisionShape *collider_shape =
       new btBoxShape(toBtV3(halfSize) + btVector3{pm.extent, 0.0f, pm.extent});
-  ctx.staticCubes.push_back({size, pos, col, mshIndex});
-  ctx.staticBodies.push_back(CreatePhysicShape(
-      ctx, RbGroups::WALL, collider_shape, 0, ~0u, pos, rotation, pm, params));
+  map.staticCubes.push_back({size, pos, col, mshIndex});
+  map.staticBodies.push_back(CreatePhysicShape(ctx, map, RbGroups::WALL,
+                                               collider_shape, 0, ~0u, pos,
+                                               rotation, pm, params));
 }
 
-void CreatePhysicCube(Context &ctx, uint32_t index, DynCube &c,
+void CreatePhysicCube(Context &ctx, GameMap &map, uint32_t index, DynCube &c,
                       const Vector3 &pos, const Vector3 &rotation,
                       const PhysicMat &pm,
                       const std::optional<DynParams> &params = {}) {
   const Vector3 halfSize = Vector3Scale(c.size, 0.5f);
   btCollisionShape *collider_shape =
       new btBoxShape(toBtV3(halfSize) + btVector3{pm.extent, 0.0f, pm.extent});
-  c.rb = CreatePhysicShape(ctx, RbGroups::OBJECT, collider_shape, 0, index, pos,
-                           rotation, pm, params);
+  c.rb = CreatePhysicShape(ctx, map, RbGroups::OBJECT, collider_shape, 0, index,
+                           pos, rotation, pm, params);
 }
 
-void CreatePhysicSphere(Context &ctx, uint32_t index, DynSphere &s,
-                        const Vector3 &pos, const PhysicMat &pm,
+void CreatePhysicSphere(Context &ctx, GameMap &map, uint32_t index,
+                        DynSphere &s, const Vector3 &pos, const PhysicMat &pm,
                         const std::optional<DynParams> &params = {}) {
   btCollisionShape *collider_shape = new btSphereShape(s.size);
-  s.rb = CreatePhysicShape(ctx, RbGroups::OBJECT, collider_shape, 1, index, pos,
-                           {0, 0, 0}, pm, params);
+  s.rb = CreatePhysicShape(ctx, map, RbGroups::OBJECT, collider_shape, 1, index,
+                           pos, {0, 0, 0}, pm, params);
 }
 
-void LoadImgMap(Context &ctx, const char *path,
+void InitPhysicsMap(Context &ctx, GameMap &map) {
+  map.collision_configuration = new btDefaultCollisionConfiguration();
+  map.dispatcher = new btCollisionDispatcher(map.collision_configuration);
+  map.overlapping_pair_cache = new btDbvtBroadphase();
+  map.solver = new btSequentialImpulseConstraintSolver;
+  map.dynamics_world =
+      new btDiscreteDynamicsWorld(map.dispatcher, map.overlapping_pair_cache,
+                                  map.solver, map.collision_configuration);
+  map.dynamics_world->setGravity(btVector3(0, -10, 0));
+}
+
+void LoadImgMap(Context &ctx, GameMap &map, const char *path,
                 const std::function<bool(Color)> &isWall,
                 const std::function<Color(Color, int)> &makeColor) {
   Image img = LoadImage(path);
@@ -369,7 +405,7 @@ void LoadImgMap(Context &ctx, const char *path,
   const Vector3 szc{psz, fh, psz};
 
   const auto GetMapAt = [&](int x, int y, int f) -> Color {
-    if (x >= 0 && x <= img.height && y >= 0 && y <= img.height && f >= 0 &&
+    if (x >= 0 && x < img.height && y >= 0 && y < img.height && f >= 0 &&
         f < floors) {
       const int o = y * img.width + (x + f * img.height);
       const Color cc = GetPixelColor(pixels + stride * o, img.format);
@@ -399,7 +435,8 @@ void LoadImgMap(Context &ctx, const char *path,
                                       f + offsets[i][2]);
             if (!isWall(co)) {
               const Color col = makeColor(cc, f);
-              CreatePhysicCube(ctx, cpos, szc, {0, 0, 0}, col, index, Wall);
+              CreatePhysicCube(ctx, map, cpos, szc, {0, 0, 0}, col, index,
+                               Wall);
               break;
             }
           }
@@ -409,13 +446,13 @@ void LoadImgMap(Context &ctx, const char *path,
   }
 
   if (startPos) {
-    CreatePlayerCapsule(ctx, *startPos);
+    CreatePlayerCapsule(ctx, ctx.player, *startPos);
   }
 
   UnloadImage(img);
 }
 
-void LoadLayersMap(Context &ctx) {
+void LoadLayersMap(Context &ctx, GameMap &map) {
   const auto isWall = [](Color c) -> bool {
     return (c.r != 0 || c.g != 0 || c.b != 0);
   };
@@ -423,23 +460,23 @@ void LoadLayersMap(Context &ctx) {
     const int fc = f & 1;
     return RndCol(76 + fc * 30, 6);
   };
-  return LoadImgMap(ctx, "assets/map00.png", isWall, makeColor);
+  return LoadImgMap(ctx, map, "assets/map00.png", isWall, makeColor);
 }
 
-void LoadSlicesMap(Context &ctx) {
+void LoadSlicesMap(Context &ctx, GameMap &map) {
   const auto isWall = [](Color c) -> bool { return (c.a < 128); };
   const auto makeColor = [](Color c, int f) {
     const int fc = f & 1;
     return RndCol(76 + fc * 30, 6);
   };
-  return LoadImgMap(ctx, "assets/map01.png", isWall, makeColor);
+  return LoadImgMap(ctx, map, "assets/map01.png", isWall, makeColor);
 }
 
-void LoadDbMap(Context &ctx, Vector3 offset) {
+void LoadDbMap(Context &ctx, GameMap &map, Vector3 offset) {
   sqlite3 *db = nullptr;
   SQ3(sqlite3_open("assets/test.db", &db));
 
-  ctx.cubes.clear(CleanCube, ctx);
+  map.cubes.clear(CleanCube, ctx, map);
 
   {
     sqlite3_stmt *st = nullptr;
@@ -463,9 +500,7 @@ void LoadDbMap(Context &ctx, Vector3 offset) {
       }
       const Vector3 pos{px + offset.x, py + 0.5f * sy + offset.y,
                         pz + offset.z};
-      ctx.cubes.push_back({{sx, sy, sz}, c, 2}, [&](size_t i, DynCube &c) {
-        CreatePhysicCube(ctx, i, c, pos, {0, 0, 0}, Wall);
-      });
+      CreatePhysicCube(ctx, map, pos, {sx, sy, sz}, {0, 0, 0}, c, 2, Wall);
     }
     SQ3(sqlite3_finalize(st));
   }
@@ -483,7 +518,7 @@ void InitDB(Context &ctx) { SQ3(sqlite3_initialize()); }
 
 void InitRender(Context &ctx) {
 #ifndef DEBUG
-  // SetTraceLogLevel(LOG_WARNING);
+  SetTraceLogLevel(LOG_ERROR);
 #endif
   SetConfigFlags(FLAG_MSAA_4X_HINT);
   InitWindow(ctx.W, ctx.H, "main");
@@ -529,26 +564,18 @@ void InitRender(Context &ctx) {
   };
 }
 
-void InitPhysics(Context &ctx) {
-  ctx.collision_configuration = new btDefaultCollisionConfiguration();
-  ctx.dispatcher = new btCollisionDispatcher(ctx.collision_configuration);
-  ctx.overlapping_pair_cache = new btDbvtBroadphase();
-  ctx.solver = new btSequentialImpulseConstraintSolver;
-  ctx.dynamics_world =
-      new btDiscreteDynamicsWorld(ctx.dispatcher, ctx.overlapping_pair_cache,
-                                  ctx.solver, ctx.collision_configuration);
-  ctx.dynamics_world->setGravity(btVector3(0, -10, 0));
-}
-
 void Init(Context &ctx) {
   ctx.tcl = Tcl_CreateInterp();
   Tcl_CreateObjCommand(ctx.tcl, "load_map", Cmd_load_map, &ctx, nullptr);
   InitDB(ctx);
   InitRender(ctx);
-  InitPhysics(ctx);
-  LoadDbMap(ctx, {90, 0.3, 112});
+  auto &map = ctx.gameMaps[""];
+  map = std::make_shared<GameMap>();
+  ctx.player.map = map;
+  InitPhysicsMap(ctx, *map);
+  LoadDbMap(ctx, *map, {90, 0.3, 112});
   // LoadLayersMap(ctx);
-  LoadSlicesMap(ctx);
+  LoadSlicesMap(ctx, *map);
 }
 
 // ================================================================================
@@ -564,15 +591,25 @@ void ReleaseRender(Context &ctx) {
   CloseWindow();
 }
 
+void ReleasePhysics(Context &ctx, GameMap &map) {
+  map.cubes.clear(CleanCube, ctx, map);
+  map.spheres.clear(CleanSphere, ctx, map);
+  for (auto *&rb : map.staticBodies)
+    CleanRigidBody(ctx, map, rb);
+  map.staticBodies.clear();
+  delete map.dynamics_world;
+  delete map.solver;
+  delete map.overlapping_pair_cache;
+  delete map.dispatcher;
+  delete map.collision_configuration;
+}
+
 void ReleasePhysics(Context &ctx) {
-  ctx.cubes.clear(CleanCube, ctx);
-  ctx.spheres.clear(CleanSphere, ctx);
-  CleanRigidBody(ctx, ctx.player);
-  delete ctx.dynamics_world;
-  delete ctx.solver;
-  delete ctx.overlapping_pair_cache;
-  delete ctx.dispatcher;
-  delete ctx.collision_configuration;
+  auto &player = ctx.player;
+  CleanRigidBody(ctx, *player.map, player.player);
+  for (const auto &kv : ctx.gameMaps)
+    ReleasePhysics(ctx, *kv.second);
+  ctx.gameMaps.clear();
 }
 
 void Release(Context &ctx) {
@@ -591,13 +628,15 @@ struct CResult {
   bool st{};
 };
 
-std::optional<CResult> CheckRayCollision(Context &ctx, Vector3 from, Vector3 to,
+std::optional<CResult> CheckRayCollision(const Context &ctx,
+                                         btDiscreteDynamicsWorld *world,
+                                         Vector3 from, Vector3 to,
                                          int skipFlags = 0) {
   const btVector3 bf = toBtV3(from);
   const btVector3 bt = toBtV3(to);
   btCollisionWorld::ClosestRayResultCallback cb{bf, bt};
   cb.m_collisionFilterMask = cb.m_collisionFilterMask & ~skipFlags;
-  ctx.dynamics_world->rayTest(bf, bt, cb);
+  world->rayTest(bf, bt, cb);
   if (!cb.hasHit())
     return {};
   const bool st = cb.m_collisionObject->isStaticObject();
@@ -606,24 +645,26 @@ std::optional<CResult> CheckRayCollision(Context &ctx, Vector3 from, Vector3 to,
                  st};
 }
 
-std::optional<CResult> CheckRayCollision(Context &ctx, const Particle &b,
-                                         float speed, Vector3 *pos = nullptr) {
+std::optional<CResult> CheckRayCollision(const Context &ctx,
+                                         btDiscreteDynamicsWorld *world,
+                                         const Particle &b, float speed,
+                                         Vector3 *pos = nullptr) {
   const float dt0 = ctx.pgtime - b.startTime;
   const float dt1 = ctx.gtime - b.startTime;
   const Vector3 from = Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt0));
   const Vector3 to = Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt1));
   if (pos)
     *pos = to;
-  return CheckRayCollision(ctx, from, to, RbGroups::PLAYER);
+  return CheckRayCollision(ctx, world, from, to, RbGroups::PLAYER);
 }
 
-void AddParticles(Context &ctx, Vector3 pos, Vector3 normal, float radius,
-                  int ptype, int count) {
+void AddParticles(const Context &ctx, GameMap &map, Vector3 pos, Vector3 normal,
+                  float radius, int ptype, int count) {
   for (int i = 0; i < count; ++i) {
     const float dx = float(GetRandomValue(-1000, 1000)) / 1000.0f;
     const float dy = float(GetRandomValue(-1000, 1000)) / 1000.0f;
     const float dz = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-    ctx.particles.push_back(
+    map.particles.push_back(
         {pos,
          Vector3Add(normal,
                     Vector3Scale(Vector3Normalize({dx, dy, dz}), radius)),
@@ -631,23 +672,23 @@ void AddParticles(Context &ctx, Vector3 pos, Vector3 normal, float radius,
   }
 }
 
-bool MoveBullet(Context &ctx, const Particle &b) {
-  const auto cpos = CheckRayCollision(ctx, b, BulletSpeed);
+bool MoveBullet(const Context &ctx, GameMap &map, const Particle &b) {
+  const auto cpos = CheckRayCollision(ctx, map.dynamics_world, b, BulletSpeed);
   if (!cpos)
     return false;
 
   const Vector3 pdir = Reflect(Vector3Normalize(b.dir), cpos->normal);
-  AddParticles(ctx, cpos->pos, pdir, 0.5f, 0, 10);
+  AddParticles(ctx, map, cpos->pos, pdir, 0.5f, 0, 10);
 
   if (!cpos->st) {
     const ID id{.v = uint32_t(cpos->index)};
     const float force = 100.0f;
     if (id.t == 0) {
-      auto *rb = ctx.cubes.at(id.i).rb;
+      auto *rb = map.cubes.at(id.i).rb;
       rb->setActivationState(ACTIVE_TAG);
       rb->applyImpulse(force * toBtV3(b.dir), {0, -0.1, 0});
     } else if (id.t == 1) {
-      auto *rb = ctx.spheres.at(id.i).rb;
+      auto *rb = map.spheres.at(id.i).rb;
       rb->setActivationState(ACTIVE_TAG);
       rb->applyImpulse(force * toBtV3(b.dir).normalize(), {0, -0.1, 0});
     }
@@ -656,18 +697,156 @@ bool MoveBullet(Context &ctx, const Particle &b) {
   return true;
 }
 
-void UpdateBullets(Context &ctx) {
-  ctx.bullets.erase(
-      std::remove_if(ctx.bullets.begin(), ctx.bullets.end(),
-                     [&](const Particle &b) { return MoveBullet(ctx, b); }),
-      ctx.bullets.end());
+void UpdateBullets(Context &ctx, GameMap &map) {
+  map.bullets.erase(std::remove_if(map.bullets.begin(), map.bullets.end(),
+                                   [&](const Particle &b) {
+                                     return MoveBullet(ctx, map, b);
+                                   }),
+                    map.bullets.end());
+}
+
+void UpdateMap(Context &ctx, GameMap &map) {
+  map.dynamics_world->stepSimulation(1.0 / float(ctx.FPS), 1);
+  UpdateBullets(ctx, map);
+}
+
+void UpdatePlayer(Context &ctx, const Camera &cam, Player &player) {
+  GameMap &map = *player.map;
+
+  if (player.grapple) {
+    const Particle &grapple = std::get<Particle>(*player.grapple);
+    Vector3 pos{};
+    auto cpos =
+        CheckRayCollision(ctx, map.dynamics_world, grapple, GrappleSpeed, &pos);
+    AddParticles(ctx, map, pos, grapple.dir, 0.1f, 1, 3);
+    if (cpos) {
+      const float force = -200.0f;
+      const ID id{.v = uint32_t(cpos->index)};
+      const auto delta = (toBtV3(cpos->pos) - toBtV3(cam.position)).normalize();
+      AddParticles(ctx, map, cpos->pos, cpos->normal, 0.5f, 1, 5);
+      if (!cpos->st) {
+        if (id.t == 0) {
+          auto *rb = map.cubes.at(id.i).rb;
+          rb->setActivationState(ACTIVE_TAG);
+          rb->applyImpulse(force * delta, {0, -0.1, 0});
+        } else if (id.t == 1) {
+          auto *rb = map.spheres.at(id.i).rb;
+          rb->setActivationState(ACTIVE_TAG);
+          rb->applyImpulse(force * delta, {0, -0.1, 0});
+        }
+      } else {
+        player.player->applyCentralImpulse(-force * delta);
+      }
+      player.grapple = {};
+    }
+  }
+}
+
+void UpdatePlayerInputs(Context &ctx, const Camera &cam, Player &player) {
+  GameMap &map = *player.map;
+
+  {
+    const float maxA = 0.99f * M_PI_2;
+    const float camSpeed = 0.003f;
+    player.camAngles =
+        Vector2Add(player.camAngles,
+                   Vector2Multiply(GetMouseDelta(), {-camSpeed, camSpeed}));
+    player.camAngles.y = std::max(-maxA, std::min(maxA, player.camAngles.y));
+  }
+
+  {
+    const bool sprint = IsKeyDown(KEY_LEFT_SHIFT);
+    const float speed = sprint ? 5.0f : 2.5f;
+    const Vector3 delta{sinf(player.camAngles.x), 0, cosf(player.camAngles.x)};
+    const Vector3 side{delta.z, delta.y, -delta.x};
+    const Vector3 move = Vector3Scale(delta, -1);
+
+    float fwd = 0.0f;
+    if (IsKeyDown(KEY_W))
+      fwd += 1.0f;
+    if (IsKeyDown(KEY_S))
+      fwd -= 1.0f;
+
+    float strafe = 0.0f;
+    if (IsKeyDown(KEY_A))
+      strafe -= 1.0f;
+    if (IsKeyDown(KEY_D))
+      strafe += 1.0f;
+
+    auto *rb = player.player;
+    const btVector3 speedVec = fwd * toBtV3(move) + strafe * toBtV3(side);
+    const btVector3 lv = rb->getLinearVelocity();
+    const btVector3 nlv = {speed * speedVec.x(), lv.y(), speed * speedVec.z()};
+    const float r0 = 16.0f;
+    const float r1 = lv.length2();
+    const float rt = 1.0f / (r0 + r1);
+    rb->setLinearVelocity(rt * r1 * lv + rt * r0 * nlv);
+    rb->setAngularFactor(0.0);
+  }
+
+  if (IsKeyPressed(KEY_F5)) {
+    TeleportPlayer(ctx, player, player.startPos);
+  }
+
+  if (IsKeyPressed(KEY_SPACE)) {
+    const auto from = cam.position;
+    const btVector3 bf{from.x, from.y, from.z};
+    const btVector3 bt = bf + btVector3{0, -0.9, 0};
+    btCollisionWorld::ClosestRayResultCallback cb{bf, bt};
+    cb.m_collisionFilterMask = cb.m_collisionFilterMask & ~RbGroups::PLAYER;
+    player.map->dynamics_world->rayTest(bf, bt, cb);
+    if (cb.m_collisionObject != nullptr) {
+      // TraceLog(LOG_INFO, "jump");
+      auto *rb = player.player;
+      rb->applyCentralImpulse({0, 30, 0});
+    }
+  }
+
+  if (IsKeyPressed(KEY_G)) {
+    const float sz = 0.5f;
+    const Vector3 dir = Vector3Scale(
+        Vector3Normalize(Vector3Subtract(cam.target, cam.position)), 20.0f);
+    const Color col = RndCol(146, 100);
+    map.cubes.push_back({{sz, sz, sz}, col, 0}, [&](size_t i, DynCube &c) {
+      CreatePhysicCube(ctx, map, i, c, cam.target, {1, 0, 0}, Box,
+                       DynParams{1.0f, dir});
+    });
+  }
+
+  if (IsKeyPressed(KEY_F)) {
+    const float sz = 0.5f * 0.5f;
+    const Vector3 dir = Vector3Scale(
+        Vector3Normalize(Vector3Subtract(cam.target, cam.position)), 20.0f);
+    const Color col = RndCol(146, 100);
+    map.spheres.push_back({sz, col, 1}, [&](size_t i, DynSphere &s) {
+      CreatePhysicSphere(ctx, map, i, s, cam.target, Box, DynParams{1.0f, dir});
+    });
+  }
+
+  {
+    const Vector3 dir =
+        Vector3Normalize(Vector3Subtract(cam.target, cam.position));
+    if (IsMouseButtonPressed(0)) {
+      const Vector3 gunPos = GetCameraOffset(ctx, player, {0, -0.09, -0.15});
+      map.bullets.push_back({gunPos, dir, ctx.gtime});
+      // shoot recoil
+      player.deltaCamAngles.y -= 0.03f;
+      player.deltaCamAngles.x += float(GetRandomValue(-10, 10)) / 2000.0f;
+    }
+    if (IsMouseButtonPressed(1)) {
+      const Vector3 grapplePos = cam.position;
+      player.grapple = Particle{grapplePos, dir, ctx.gtime};
+    }
+  }
 }
 
 bool Update(Context &ctx) {
+  auto &player = ctx.player;
+
   const bool esc = IsKeyPressed(KEY_ESCAPE);
   const bool quit = ctx.lockCursor && esc;
 
-  ctx.deltaCamAngles = Vector2Scale(ctx.deltaCamAngles, 0.95f);
+  player.deltaCamAngles = Vector2Scale(player.deltaCamAngles, 0.95f);
   ctx.pgtime = ctx.gtime;
   ctx.gtime += 1.0 / float(ctx.FPS);
 
@@ -679,127 +858,17 @@ bool Update(Context &ctx) {
       EnableCursor();
   }
 
-  Camera3D cam = GetCamera(ctx);
-
-  if (ctx.grapple) {
-    const Particle &grapple = std::get<Particle>(*ctx.grapple);
-    Vector3 pos{};
-    auto cpos = CheckRayCollision(ctx, grapple, GrappleSpeed, &pos);
-    AddParticles(ctx, pos, grapple.dir, 0.1f, 1, 3);
-    if (cpos) {
-      const float force = -200.0f;
-      const ID id{.v = uint32_t(cpos->index)};
-      const auto delta = (toBtV3(cpos->pos) - toBtV3(cam.position)).normalize();
-      AddParticles(ctx, cpos->pos, cpos->normal, 0.5f, 1, 5);
-      if (!cpos->st) {
-        if (id.t == 0) {
-          auto *rb = ctx.cubes.at(id.i).rb;
-          rb->setActivationState(ACTIVE_TAG);
-          rb->applyImpulse(force * delta, {0, -0.1, 0});
-        } else if (id.t == 1) {
-          auto *rb = ctx.spheres.at(id.i).rb;
-          rb->setActivationState(ACTIVE_TAG);
-          rb->applyImpulse(force * delta, {0, -0.1, 0});
-        }
-      } else {
-        ctx.player->applyCentralImpulse(-force * delta);
-      }
-      ctx.grapple = {};
-    }
+  {
+    std::shared_ptr<GameMap> mapPtr = ctx.gameMaps[""];
+    auto &map = *mapPtr;
+    UpdateMap(ctx, map);
   }
 
+  const Camera3D cam = GetCamera(ctx, player);
+  UpdatePlayer(ctx, cam, player);
+
   if (ctx.lockCursor) {
-    const float maxA = 0.99f * M_PI_2;
-    const float camSpeed = 0.003f;
-    ctx.camAngles = Vector2Add(
-        ctx.camAngles, Vector2Multiply(GetMouseDelta(), {-camSpeed, camSpeed}));
-    ctx.camAngles.y = std::max(-maxA, std::min(maxA, ctx.camAngles.y));
-
-    {
-      const bool sprint = IsKeyDown(KEY_LEFT_SHIFT);
-      const float speed = sprint ? 5.0f : 2.5f;
-      const Vector3 delta{sinf(ctx.camAngles.x), 0, cosf(ctx.camAngles.x)};
-      const Vector3 side{delta.z, delta.y, -delta.x};
-      const Vector3 move = Vector3Scale(delta, -1);
-
-      float fwd = 0.0f;
-      if (IsKeyDown(KEY_W))
-        fwd += 1.0f;
-      if (IsKeyDown(KEY_S))
-        fwd -= 1.0f;
-
-      float strafe = 0.0f;
-      if (IsKeyDown(KEY_A))
-        strafe -= 1.0f;
-      if (IsKeyDown(KEY_D))
-        strafe += 1.0f;
-
-      auto *rb = ctx.player;
-      const btVector3 speedVec = fwd * toBtV3(move) + strafe * toBtV3(side);
-      const btVector3 lv = rb->getLinearVelocity();
-      const btVector3 nlv = {speed * speedVec.x(), lv.y(),
-                             speed * speedVec.z()};
-      const float r0 = 16.0f;
-      const float r1 = lv.length2();
-      const float rt = 1.0f / (r0 + r1);
-      rb->setLinearVelocity(rt * r1 * lv + rt * r0 * nlv);
-      rb->setAngularFactor(0.0);
-    }
-
-    ctx.dynamics_world->stepSimulation(1.0 / float(ctx.FPS), 1);
-
-    if (IsKeyPressed(KEY_SPACE)) {
-      const auto from = cam.position;
-      const btVector3 bf{from.x, from.y, from.z};
-      const btVector3 bt = bf + btVector3{0, -0.9, 0};
-      btCollisionWorld::ClosestRayResultCallback cb{bf, bt};
-      cb.m_collisionFilterMask = cb.m_collisionFilterMask & ~RbGroups::PLAYER;
-      ctx.dynamics_world->rayTest(bf, bt, cb);
-      if (cb.m_collisionObject != nullptr) {
-        // TraceLog(LOG_INFO, "jump");
-        auto *rb = ctx.player;
-        rb->applyCentralImpulse({0, 30, 0});
-      }
-    }
-
-    if (IsKeyPressed(KEY_G)) {
-      const float sz = 0.5f;
-      const Vector3 dir = Vector3Scale(
-          Vector3Normalize(Vector3Subtract(cam.target, cam.position)), 20.0f);
-      const Color col = RndCol(146, 100);
-      ctx.cubes.push_back({{sz, sz, sz}, col, 0}, [&](size_t i, DynCube &c) {
-        CreatePhysicCube(ctx, i, c, cam.target, {1, 0, 0}, Box,
-                         DynParams{1.0f, dir});
-      });
-    }
-
-    if (IsKeyPressed(KEY_F)) {
-      const float sz = 0.5f * 0.5f;
-      const Vector3 dir = Vector3Scale(
-          Vector3Normalize(Vector3Subtract(cam.target, cam.position)), 20.0f);
-      const Color col = RndCol(146, 100);
-      ctx.spheres.push_back({sz, col, 1}, [&](size_t i, DynSphere &s) {
-        CreatePhysicSphere(ctx, i, s, cam.target, Box, DynParams{1.0f, dir});
-      });
-    }
-
-    UpdateBullets(ctx);
-
-    {
-      const Vector3 dir =
-          Vector3Normalize(Vector3Subtract(cam.target, cam.position));
-      if (IsMouseButtonPressed(0)) {
-        const Vector3 gunPos = GetCameraOffset(ctx, {0, -0.09, -0.15});
-        ctx.bullets.push_back({gunPos, dir, ctx.gtime});
-        // shoot recoil
-        ctx.deltaCamAngles.y -= 0.03f;
-        ctx.deltaCamAngles.x += float(GetRandomValue(-10, 10)) / 2000.0f;
-      }
-      if (IsMouseButtonPressed(1)) {
-        const Vector3 grapplePos = cam.position;
-        ctx.grapple = Particle{grapplePos, dir, ctx.gtime};
-      }
-    }
+    UpdatePlayerInputs(ctx, cam, player);
   } else {
     if (!ctx.command.empty()) {
       TraceLog(LOG_INFO, "console: %s", ctx.command.c_str());
@@ -837,63 +906,7 @@ void DrawRope(Context &ctx, Vector3 from0, Vector3 to0, Vector3 from1,
   DrawSphere(to1, sr, WHITE);
 }
 
-void RenderView(Context &ctx, const Camera &cam) {
-  if (ctx.grapple) {
-    Vector3 pos{};
-    const Vector3 startPos = GetCameraOffset(ctx, {0, -0.09, 0.15});
-    const Particle &grapple = std::get<Particle>(*ctx.grapple);
-    CheckRayCollision(ctx, grapple, GrappleSpeed, &pos);
-    DrawRope(ctx, grapple.startPos, pos, startPos, pos, 16);
-  }
-
-  for (const auto &c : ctx.staticCubes) {
-    DrawModelEx(ctx.models[c.index], c.position, {0, 1, 0}, 0, c.size, c.col);
-  }
-
-  ctx.cubes.forEach([&](size_t i, DynCube &c) {
-    btTransform bt;
-    c.rb->getMotionState()->getWorldTransform(bt);
-    const auto p = bt.getOrigin();
-    const auto quat = bt.getRotation();
-    const auto btaxis = quat.getAxis();
-    const Vector3 pos = toRlV3(p);
-    const Vector3 axis = toRlV3(btaxis);
-    const float radian_scale = 57.296;
-    const float angle = float(quat.getAngle()) * radian_scale;
-    DrawModelEx(ctx.models[c.index], pos, axis, angle, c.size, c.col);
-  });
-
-  ctx.spheres.forEach([&](size_t i, DynSphere &s) {
-    btTransform bt;
-    s.rb->getMotionState()->getWorldTransform(bt);
-    const auto p = bt.getOrigin();
-    const auto quat = bt.getRotation();
-    const auto btaxis = quat.getAxis();
-    const Vector3 pos = toRlV3(p);
-    const Vector3 axis = toRlV3(btaxis);
-    const float radian_scale = 57.296;
-    const float angle = float(quat.getAngle()) * radian_scale;
-    DrawModelEx(ctx.models[s.index], pos, axis, angle, {s.size, s.size, s.size},
-                s.col);
-  });
-}
-
-void RenderGui(Context &ctx) {
-  if (ctx.lockCursor)
-    return;
-  const float o = 22.0f;
-  const float y = GetScreenHeight() - o;
-  const float w = GetScreenWidth();
-  DrawRectangle(0, y - 0.0f, w, o, WHITE);
-  GuiLabel(Inset({0, y, o, o}), "F1");
-  if (GuiTextBox(Inset({o, y, w - o, o}), ctx.commandBuffer,
-                 sizeof(ctx.commandBuffer), !ctx.lockCursor)) {
-    ctx.command = ctx.commandBuffer;
-    ctx.commandBuffer[0] = 0;
-  }
-}
-
-void RenderParticles(Context &ctx) {
+void RenderParticles(Context &ctx, GameMap &map) {
   const Color ctable[2] = {
       Color{253, 249, 0, 255},
       BLUE,
@@ -902,9 +915,9 @@ void RenderParticles(Context &ctx) {
       0.05f,
       0.01f,
   };
-  ctx.particles.erase(
+  map.particles.erase(
       std::remove_if(
-          ctx.particles.begin(), ctx.particles.end(),
+          map.particles.begin(), map.particles.end(),
           [&](const Particle &p) -> bool {
             const float dt = ctx.gtime - p.startTime;
             const float maxt = 0.3f;
@@ -922,13 +935,13 @@ void RenderParticles(Context &ctx) {
             DrawCube(pos, sz, sz, sz, Color{bc.r, bc.g, bc.b, alpha});
             return false;
           }),
-      ctx.particles.end());
+      map.particles.end());
 }
 
-void RenderBullets(Context &ctx) {
+void RenderBullets(Context &ctx, GameMap &map) {
   Color col = YELLOW;
   col.a = 90;
-  for (const auto &b : ctx.bullets) {
+  for (const auto &b : map.bullets) {
     const float dt0 = ctx.pgtime - b.startTime;
     const float dt1 = ctx.gtime - b.startTime;
     const float speed = BulletSpeed;
@@ -937,6 +950,69 @@ void RenderBullets(Context &ctx) {
     const Vector3 to = Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt1));
     const float sz = 0.01f;
     DrawCapsule(from, to, sz, 8, 4, col);
+  }
+}
+
+void RenderViewMap(Context &ctx, const Camera &cam, Player &player,
+                   GameMap &map) {
+  if (player.grapple) {
+    Vector3 pos{};
+    const Vector3 startPos = GetCameraOffset(ctx, player, {0, -0.09, 0.15});
+    const Particle &grapple = std::get<Particle>(*player.grapple);
+    CheckRayCollision(ctx, map.dynamics_world, grapple, GrappleSpeed, &pos);
+    DrawRope(ctx, grapple.startPos, pos, startPos, pos, 16);
+  }
+
+  for (const auto &c : map.staticCubes) {
+    DrawModelEx(ctx.models[c.index], c.position, {0, 1, 0}, 0, c.size, c.col);
+  }
+
+  const auto getTranform =
+      [](const btRigidBody *rb) -> std::tuple<Vector3, Vector3, float> {
+    btTransform bt;
+    rb->getMotionState()->getWorldTransform(bt);
+    const auto p = bt.getOrigin();
+    const auto quat = bt.getRotation();
+    const auto btaxis = quat.getAxis();
+    const Vector3 pos = toRlV3(p);
+    const Vector3 axis = toRlV3(btaxis);
+    const float radian_scale = 180.0 / PI;
+    const float angle = float(quat.getAngle()) * radian_scale;
+    return {pos, axis, angle};
+  };
+
+  map.cubes.forEach([&](size_t i, DynCube &c) {
+    const auto &[pos, axis, angle] = getTranform(c.rb);
+    DrawModelEx(ctx.models[c.index], pos, axis, angle, c.size, c.col);
+  });
+
+  map.spheres.forEach([&](size_t i, DynSphere &s) {
+    const auto &[pos, axis, angle] = getTranform(s.rb);
+    DrawModelEx(ctx.models[s.index], pos, axis, angle, {s.size, s.size, s.size},
+                s.col);
+  });
+
+  RenderBullets(ctx, map);
+  RenderParticles(ctx, map);
+}
+
+void RenderView(Context &ctx, const Camera &cam) {
+  Player &player = ctx.player;
+  RenderViewMap(ctx, cam, player, *player.map);
+}
+
+void RenderGui(Context &ctx) {
+  if (ctx.lockCursor)
+    return;
+  const float o = 22.0f;
+  const float y = GetScreenHeight() - o;
+  const float w = GetScreenWidth();
+  DrawRectangle(0, y - 0.0f, w, o, WHITE);
+  GuiLabel(Inset({0, y, o, o}), "F1");
+  if (GuiTextBox(Inset({o, y, w - o, o}), ctx.commandBuffer,
+                 sizeof(ctx.commandBuffer), !ctx.lockCursor)) {
+    ctx.command = ctx.commandBuffer;
+    ctx.commandBuffer[0] = 0;
   }
 }
 
@@ -950,26 +1026,20 @@ void RenderHUD(Context &ctx) {
 
 #ifdef DEBUG
   char buffer[2048]{};
-  const Camera cam = GetCamera(ctx);
-  snprintf(buffer, sizeof(buffer), "%d fps\n(%.02f,%.02f,%.02f)", GetFPS(),
-           cam.position.x, cam.position.y, cam.position.z);
+  snprintf(buffer, sizeof(buffer), "%d fps", GetFPS());
   DrawText(buffer, 0, 0, 20, WHITE);
 #endif
 }
 
 void Render(Context &ctx) {
   ctx.frame += 1;
-  const Camera3D cam = GetCamera(ctx);
   BeginDrawing();
   {
     BeginTextureMode(ctx.rt);
     ClearBackground(PINK);
+    const Camera3D cam = GetCamera(ctx, ctx.player);
     BeginMode3D(cam);
-    {
-      RenderView(ctx, cam);
-      RenderBullets(ctx);
-      RenderParticles(ctx);
-    }
+    { RenderView(ctx, cam); }
     EndMode3D();
     RenderGui(ctx);
     RenderHUD(ctx);
