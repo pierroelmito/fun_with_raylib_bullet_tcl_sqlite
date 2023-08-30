@@ -147,6 +147,8 @@ public:
 };
 
 struct GameMap {
+  GameMap() {}
+  GameMap(const GameMap &) = delete;
   btDefaultCollisionConfiguration *collision_configuration{};
   btCollisionDispatcher *dispatcher{};
   btBroadphaseInterface *overlapping_pair_cache{};
@@ -158,10 +160,12 @@ struct GameMap {
   ObjectList<DynSphere> spheres;
   std::vector<StaCube> staticCubes{};
   std::vector<btRigidBody *> staticBodies{};
+  Vector3 startPos{};
 };
 
 struct Player {
-  Vector3 startPos{};
+  Player() {}
+  Player(const Player &) = delete;
   Vector2 camAngles{};
   Vector2 deltaCamAngles{};
   btRigidBody *player{};
@@ -170,6 +174,8 @@ struct Player {
 };
 
 struct Context {
+  Context() {}
+  Context(const Context &) = delete;
   // script
   Tcl_Interp *tcl{};
   // map
@@ -195,6 +201,14 @@ struct Context {
 };
 
 using DynParams = std::tuple<float, Vector3>;
+
+inline bool TCL(Tcl_Interp *tcl, int r) {
+  if (r == TCL_ERROR) {
+    const std::string err = Tcl_GetVar(tcl, "errorInfo", TCL_GLOBAL_ONLY);
+    TraceLog(LOG_ERROR, "%s", err.c_str());
+  }
+  return r == TCL_OK;
+}
 
 inline bool SQ3(int r, sqlite3 *db = nullptr) {
   const bool ok = r == SQLITE_OK;
@@ -272,10 +286,10 @@ btTransform MakeTransform(const Vector3 &pos, const Vector3 &rotation) {
   return transform;
 }
 
-void CreatePlayerCapsule(Context &ctx, Player &player, Vector3 pos) {
+void CreatePlayerCapsule(Context &ctx, Player &player) {
   btCapsuleShape *cs = new btCapsuleShape(0.4f, 0.2f);
 
-  const btTransform transform = MakeTransform(pos, {0, 0, 0});
+  const btTransform transform = MakeTransform({0, 0, 0}, {0, 0, 0});
 
   const float mass = 5.0f;
   const btScalar object_mass(mass);
@@ -291,17 +305,24 @@ void CreatePlayerCapsule(Context &ctx, Player &player, Vector3 pos) {
   rb_info.m_angularDamping = 0.0f;
 
   btRigidBody *body = new btRigidBody(rb_info);
-  std::shared_ptr<GameMap> map = ctx.gameMaps[""];
-  map->dynamics_world->addRigidBody(body, RbGroups::PLAYER,
-                                    btBroadphaseProxy::AllFilter);
   body->setActivationState(DISABLE_DEACTIVATION);
   player.player = body;
-  player.startPos = pos;
 }
 
-void TeleportPlayer(Context &ctx, Player &player, Vector3 pos) {
+void TeleportPlayer(Context &ctx, Player &player,
+                    std::shared_ptr<GameMap> map) {
+  if (player.map != map) {
+    if (player.map) {
+      player.map->dynamics_world->removeRigidBody(ctx.player.player);
+    }
+    player.map = map;
+    if (player.map) {
+      map->dynamics_world->addRigidBody(ctx.player.player, RbGroups::PLAYER,
+                                        btBroadphaseProxy::AllFilter);
+    }
+  }
   btTransform t{};
-  t.setOrigin(toBtV3(pos));
+  t.setOrigin(toBtV3(map->startPos));
   auto *rb = player.player;
   rb->setWorldTransform(t);
   rb->setLinearVelocity({0, 0, 0});
@@ -388,10 +409,10 @@ void InitPhysicsMap(Context &ctx, GameMap &map) {
   map.dynamics_world->setGravity(btVector3(0, -10, 0));
 }
 
-void LoadImgMap(Context &ctx, GameMap &map, const char *path,
+void LoadImgMap(Context &ctx, GameMap &map, const std::string &path,
                 const std::function<bool(Color)> &isWall,
                 const std::function<Color(Color, int)> &makeColor) {
-  Image img = LoadImage(path);
+  Image img = LoadImage(path.c_str());
   const int floors = img.width / img.height;
   const int stride = img.format == PIXELFORMAT_UNCOMPRESSED_R8G8B8 ? 3 : 4;
 
@@ -415,11 +436,13 @@ void LoadImgMap(Context &ctx, GameMap &map, const char *path,
   };
 
   for (int f = -1; f < floors + 1; ++f) {
+    bool emptyFloor = f >= 0;
     for (int y = 0; y < img.height; ++y) {
       for (int x = 0; x < img.height; ++x) {
         const Color cc = GetMapAt(x, y, f);
         const Vector3 cpos{x * psz, (f + 0.5f) * fh, y * psz};
         if (!isWall(cc)) {
+          emptyFloor = false;
           const Color co = GetMapAt(x, y, f - 1);
           if (isWall(co)) {
             startPos = Vector3{cpos.x, f * fh + 0.5f, cpos.z};
@@ -443,16 +466,18 @@ void LoadImgMap(Context &ctx, GameMap &map, const char *path,
         }
       }
     }
+    if (emptyFloor)
+      break;
   }
 
   if (startPos) {
-    CreatePlayerCapsule(ctx, ctx.player, *startPos);
+    map.startPos = *startPos;
   }
 
   UnloadImage(img);
 }
 
-void LoadLayersMap(Context &ctx, GameMap &map) {
+void LoadLayersMap(Context &ctx, GameMap &map, const std::string &path) {
   const auto isWall = [](Color c) -> bool {
     return (c.r != 0 || c.g != 0 || c.b != 0);
   };
@@ -460,21 +485,21 @@ void LoadLayersMap(Context &ctx, GameMap &map) {
     const int fc = f & 1;
     return RndCol(76 + fc * 30, 6);
   };
-  return LoadImgMap(ctx, map, "assets/map00.png", isWall, makeColor);
+  return LoadImgMap(ctx, map, path, isWall, makeColor);
 }
 
-void LoadSlicesMap(Context &ctx, GameMap &map) {
+void LoadSlicesMap(Context &ctx, GameMap &map, const std::string &path) {
   const auto isWall = [](Color c) -> bool { return (c.a < 128); };
   const auto makeColor = [](Color c, int f) {
     const int fc = f & 1;
     return RndCol(76 + fc * 30, 6);
   };
-  return LoadImgMap(ctx, map, "assets/map01.png", isWall, makeColor);
+  return LoadImgMap(ctx, map, path, isWall, makeColor);
 }
 
-void LoadDbMap(Context &ctx, GameMap &map, Vector3 offset) {
+void LoadDbMap(Context &ctx, GameMap &map, const char *path) {
   sqlite3 *db = nullptr;
-  SQ3(sqlite3_open("assets/test.db", &db));
+  SQ3(sqlite3_open(path, &db));
 
   map.cubes.clear(CleanCube, ctx, map);
 
@@ -498,8 +523,7 @@ void LoadDbMap(Context &ctx, GameMap &map, Vector3 offset) {
         sscanf((const char *)col, "%02x%02x%02x", &r, &g, &b);
         c = Color{uint8_t(r), uint8_t(g), uint8_t(b), 255};
       }
-      const Vector3 pos{px + offset.x, py + 0.5f * sy + offset.y,
-                        pz + offset.z};
+      const Vector3 pos{px, py + 0.5f * sy, pz};
       CreatePhysicCube(ctx, map, pos, {sx, sy, sz}, {0, 0, 0}, c, 2, Wall);
     }
     SQ3(sqlite3_finalize(st));
@@ -508,7 +532,85 @@ void LoadDbMap(Context &ctx, GameMap &map, Vector3 offset) {
   SQ3(sqlite3_close(db));
 }
 
-int Cmd_load_map(ClientData data, Tcl_Interp *, int, Tcl_Obj *const *) {
+std::shared_ptr<GameMap> GetMap(Context &ctx, const std::string &mapName) {
+  auto &map = ctx.gameMaps[mapName];
+  if (!map) {
+    TraceLog(LOG_INFO, "init new map");
+    map = std::make_shared<GameMap>();
+    InitPhysicsMap(ctx, *map);
+  }
+  return map;
+}
+
+template <typename T> struct TclConvertTo {
+  static bool To(Tcl_Interp *tcl, Tcl_Obj *obj, T *v) = delete;
+};
+
+template <> struct TclConvertTo<std::string> {
+  static bool To(Tcl_Interp *tcl, Tcl_Obj *obj, std::string *v) {
+    int sz{};
+    *v = Tcl_GetStringFromObj(obj, &sz);
+    return true;
+  }
+};
+
+template <typename T> T TclTo(Tcl_Interp *tcl, Tcl_Obj *obj) {
+  T r{};
+  TclConvertTo<T>::To(tcl, obj, &r);
+  return r;
+}
+
+template <typename T> struct TclConvertFrom {
+  static Tcl_Obj *From(Tcl_Interp *tcl, const T &v) = delete;
+};
+
+template <> struct TclConvertFrom<std::string> {
+  static Tcl_Obj *From(Tcl_Interp *tcl, const std::string &v) {
+    return Tcl_NewStringObj(v.c_str(), v.size());
+  }
+};
+
+template <size_t N> struct TclConvertFrom<char[N]> {
+  static Tcl_Obj *From(Tcl_Interp *tcl, std::string_view v) {
+    return Tcl_NewStringObj(&v[0], v.size());
+  }
+};
+
+template <typename T> Tcl_Obj *TclFrom(Tcl_Interp *tcl, const T &v) {
+  Tcl_Obj *r{};
+  r = TclConvertFrom<T>::From(tcl, v);
+  return r;
+}
+
+template <typename... T> bool TclCall(Tcl_Interp *tcl, const T &...args) {
+  Tcl_Obj *objs[sizeof...(T)] = {TclFrom(tcl, args)...};
+  Tcl_EvalObjv(tcl, sizeof...(T), objs, 0);
+  return true;
+}
+
+int Cmd_load_map_slices(ClientData data, Tcl_Interp *tcl, int argc,
+                        Tcl_Obj *const *argv) {
+  Context &ctx = *((Context *)data);
+  const std::string mapName = TclTo<std::string>(tcl, argv[1]);
+  const std::string mapPath = TclTo<std::string>(tcl, argv[2]);
+  TraceLog(LOG_INFO, "Cmd_load_map_slices %s %s", mapName.c_str(),
+           mapPath.c_str());
+  auto map = GetMap(ctx, mapName);
+  LoadSlicesMap(ctx, *map, mapPath);
+  return TCL_OK;
+}
+
+int Cmd_teleport(ClientData data, Tcl_Interp *tcl, int argc,
+                 Tcl_Obj *const *argv) {
+  const std::string mapName = TclTo<std::string>(tcl, argv[1]);
+  TraceLog(LOG_INFO, "Cmd_teleport %s", mapName.c_str());
+  return TCL_OK;
+}
+
+int Cmd_tracelog(ClientData data, Tcl_Interp *tcl, int argc,
+                 Tcl_Obj *const *argv) {
+  const std::string line = TclTo<std::string>(tcl, argv[1]);
+  TraceLog(LOG_INFO, "%s", line.c_str());
   return TCL_OK;
 }
 
@@ -566,16 +668,22 @@ void InitRender(Context &ctx) {
 
 void Init(Context &ctx) {
   ctx.tcl = Tcl_CreateInterp();
-  Tcl_CreateObjCommand(ctx.tcl, "load_map", Cmd_load_map, &ctx, nullptr);
+
+#define CMD(X) Tcl_CreateObjCommand(ctx.tcl, #X, Cmd_##X, &ctx, nullptr)
+  CMD(load_map_slices);
+  CMD(tracelog);
+  CMD(teleport);
+#undef CMD
+
   InitDB(ctx);
   InitRender(ctx);
-  auto &map = ctx.gameMaps[""];
-  map = std::make_shared<GameMap>();
-  ctx.player.map = map;
-  InitPhysicsMap(ctx, *map);
-  LoadDbMap(ctx, *map, {90, 0.3, 112});
-  // LoadLayersMap(ctx);
-  LoadSlicesMap(ctx, *map);
+  CreatePlayerCapsule(ctx, ctx.player);
+
+  const std::string startupMap = "hub";
+  TCL(ctx.tcl, Tcl_EvalFile(ctx.tcl, "assets/init.tcl"));
+  TclCall(ctx.tcl, "load_map", startupMap);
+  auto map = GetMap(ctx, startupMap);
+  TeleportPlayer(ctx, ctx.player, map);
 }
 
 // ================================================================================
@@ -785,7 +893,7 @@ void UpdatePlayerInputs(Context &ctx, const Camera &cam, Player &player) {
   }
 
   if (IsKeyPressed(KEY_F5)) {
-    TeleportPlayer(ctx, player, player.startPos);
+    TeleportPlayer(ctx, player, player.map);
   }
 
   if (IsKeyPressed(KEY_SPACE)) {
@@ -858,11 +966,7 @@ bool Update(Context &ctx) {
       EnableCursor();
   }
 
-  {
-    std::shared_ptr<GameMap> mapPtr = ctx.gameMaps[""];
-    auto &map = *mapPtr;
-    UpdateMap(ctx, map);
-  }
+  UpdateMap(ctx, *ctx.player.map);
 
   const Camera3D cam = GetCamera(ctx, player);
   UpdatePlayer(ctx, cam, player);
@@ -1058,7 +1162,7 @@ void Render(Context &ctx) {
 // ================================================================================
 
 int main(int, char **) {
-  Context ctx;
+  Context ctx{};
   Init(ctx);
   while (Update(ctx))
     Render(ctx);
