@@ -746,7 +746,7 @@ void UpdatePlayerInputs(Context &ctx, const Camera &cam, Player &player) {
   GameMap &map = *player.map;
 
   {
-    const float maxA = 0.99f * M_PI_2;
+    const float maxA = 0.99f * 0.5f * PI;
     const float camSpeed = 0.003f;
     player.camAngles =
         Vector2Add(player.camAngles,
