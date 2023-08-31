@@ -4,9 +4,9 @@ proc load_map { mapName } {
 	switch -exact -- $mapName {
 		hub {
 			load_map_slices $mapName {assets/hub.png} {
-				{ 1 1 0 } { teleport map00 }
-				{ 2 1 0 } { teleport map01 }
-				{ 3 1 0 } { teleport map02 }
+				{ { 12 12 0 } { teleport map00 } }
+				{ { 14 12 0 } { teleport map01 } }
+				{ { 16 12 0 } { teleport map02 } }
 			}
 		}
 		map00 {

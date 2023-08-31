@@ -182,6 +182,7 @@ struct Context {
   std::map<std::string, std::shared_ptr<GameMap>> gameMaps{};
   // player
   Player player{};
+  std::optional<Vector3> targetPos{};
   // GUI
   char commandBuffer[1024]{};
   std::string command{};
@@ -366,17 +367,18 @@ btRigidBody *CreatePhysicShape(Context &ctx, GameMap &map, int group,
   return body;
 }
 
-void CreatePhysicCube(Context &ctx, GameMap &map, const Vector3 &pos,
-                      const Vector3 &size, const Vector3 &rotation, Color col,
-                      uint32_t mshIndex, const PhysicMat &pm,
-                      const std::optional<DynParams> &params = {}) {
+btRigidBody *CreatePhysicCube(Context &ctx, GameMap &map, const Vector3 &pos,
+                              const Vector3 &size, const Vector3 &rotation,
+                              Color col, uint32_t mshIndex, const PhysicMat &pm,
+                              const std::optional<DynParams> &params = {}) {
   const Vector3 halfSize = Vector3Scale(size, 0.5f);
   btCollisionShape *collider_shape =
       new btBoxShape(toBtV3(halfSize) + btVector3{pm.extent, 0.0f, pm.extent});
   map.staticCubes.push_back({size, pos, col, mshIndex});
-  map.staticBodies.push_back(CreatePhysicShape(ctx, map, RbGroups::WALL,
-                                               collider_shape, 0, ~0u, pos,
-                                               rotation, pm, params));
+  btRigidBody *rb = CreatePhysicShape(ctx, map, RbGroups::WALL, collider_shape,
+                                      0, ~0u, pos, rotation, pm, params);
+  map.staticBodies.push_back(rb);
+  return rb;
 }
 
 void CreatePhysicCube(Context &ctx, GameMap &map, uint32_t index, DynCube &c,
@@ -409,7 +411,11 @@ void InitPhysicsMap(Context &ctx, GameMap &map) {
   map.dynamics_world->setGravity(btVector3(0, -10, 0));
 }
 
+using SliceCoord = std::array<int, 3>;
+using SliceSpawns = std::vector<std::pair<SliceCoord, std::string>>;
+
 void LoadImgMap(Context &ctx, GameMap &map, const std::string &path,
+                const SliceSpawns &spawns,
                 const std::function<bool(Color)> &isWall,
                 const std::function<Color(Color, int)> &makeColor) {
   Image img = LoadImage(path.c_str());
@@ -470,6 +476,13 @@ void LoadImgMap(Context &ctx, GameMap &map, const std::string &path,
       break;
   }
 
+  for (const auto &spawn : spawns) {
+    const auto [x, y, f] = spawn.first;
+    const Vector3 cpos{x * psz, f * fh + 0.5f, y * psz};
+    CreatePhysicCube(ctx, map, cpos, Vector3{1, 1, 1}, Vector3{0, 0, 0}, WHITE,
+                     2, Wall);
+  }
+
   if (startPos) {
     map.startPos = *startPos;
   }
@@ -485,16 +498,17 @@ void LoadLayersMap(Context &ctx, GameMap &map, const std::string &path) {
     const int fc = f & 1;
     return RndCol(76 + fc * 30, 6);
   };
-  return LoadImgMap(ctx, map, path, isWall, makeColor);
+  return LoadImgMap(ctx, map, path, {}, isWall, makeColor);
 }
 
-void LoadSlicesMap(Context &ctx, GameMap &map, const std::string &path) {
+void LoadSlicesMap(Context &ctx, GameMap &map, const std::string &path,
+                   const SliceSpawns &spawns) {
   const auto isWall = [](Color c) -> bool { return (c.a < 128); };
   const auto makeColor = [](Color c, int f) {
     const int fc = f & 1;
     return RndCol(76 + fc * 30, 6);
   };
-  return LoadImgMap(ctx, map, path, isWall, makeColor);
+  return LoadImgMap(ctx, map, path, spawns, isWall, makeColor);
 }
 
 void LoadDbMap(Context &ctx, GameMap &map, const char *path) {
@@ -554,6 +568,60 @@ template <> struct TclConvertTo<std::string> {
   }
 };
 
+template <> struct TclConvertTo<int> {
+  static bool To(Tcl_Interp *tcl, Tcl_Obj *obj, int *v) {
+    int r{};
+    Tcl_GetIntFromObj(tcl, obj, &r);
+    *v = r;
+    return true;
+  }
+};
+
+template <typename T> struct TclConvertTo<std::vector<T>> {
+  static bool To(Tcl_Interp *tcl, Tcl_Obj *obj, std::vector<T> *v) {
+    int sz{};
+    Tcl_ListObjLength(tcl, obj, &sz);
+    v->resize(sz);
+    for (int i = 0; i < sz; ++i) {
+      Tcl_Obj *item{};
+      Tcl_ListObjIndex(tcl, obj, i, &item);
+      TclConvertTo<T>::To(tcl, item, &(*v)[i]);
+    }
+    return true;
+  }
+};
+
+template <typename K, typename V> struct TclConvertTo<std::pair<K, V>> {
+  static bool To(Tcl_Interp *tcl, Tcl_Obj *obj, std::pair<K, V> *v) {
+    int sz{};
+    Tcl_ListObjLength(tcl, obj, &sz);
+    if (sz != 2)
+      return false;
+    Tcl_Obj *vk{};
+    Tcl_ListObjIndex(tcl, obj, 0, &vk);
+    TclConvertTo<K>::To(tcl, vk, &v->first);
+    Tcl_Obj *vv{};
+    Tcl_ListObjIndex(tcl, obj, 1, &vv);
+    TclConvertTo<V>::To(tcl, vv, &v->second);
+    return true;
+  }
+};
+
+template <typename T, size_t N> struct TclConvertTo<std::array<T, N>> {
+  static bool To(Tcl_Interp *tcl, Tcl_Obj *obj, std::array<T, N> *v) {
+    int sz{};
+    Tcl_ListObjLength(tcl, obj, &sz);
+    if (sz != N)
+      return false;
+    for (int i = 0; i < sz; ++i) {
+      Tcl_Obj *item{};
+      Tcl_ListObjIndex(tcl, obj, i, &item);
+      TclConvertTo<T>::To(tcl, item, &(*v)[i]);
+    }
+    return true;
+  }
+};
+
 template <typename T> T TclTo(Tcl_Interp *tcl, Tcl_Obj *obj) {
   T r{};
   TclConvertTo<T>::To(tcl, obj, &r);
@@ -591,12 +659,16 @@ template <typename... T> bool TclCall(Tcl_Interp *tcl, const T &...args) {
 int Cmd_load_map_slices(ClientData data, Tcl_Interp *tcl, int argc,
                         Tcl_Obj *const *argv) {
   Context &ctx = *((Context *)data);
-  const std::string mapName = TclTo<std::string>(tcl, argv[1]);
-  const std::string mapPath = TclTo<std::string>(tcl, argv[2]);
+
+  const auto mapName = TclTo<std::string>(tcl, argv[1]);
+  const auto mapPath = TclTo<std::string>(tcl, argv[2]);
+  const auto spawns = TclTo<SliceSpawns>(tcl, argv[3]);
+
   TraceLog(LOG_INFO, "Cmd_load_map_slices %s %s", mapName.c_str(),
            mapPath.c_str());
   auto map = GetMap(ctx, mapName);
-  LoadSlicesMap(ctx, *map, mapPath);
+  LoadSlicesMap(ctx, *map, mapPath, spawns);
+
   return TCL_OK;
 }
 
@@ -969,6 +1041,7 @@ bool Update(Context &ctx) {
   UpdateMap(ctx, *ctx.player.map);
 
   const Camera3D cam = GetCamera(ctx, player);
+
   UpdatePlayer(ctx, cam, player);
 
   if (ctx.lockCursor) {
@@ -979,6 +1052,22 @@ bool Update(Context &ctx) {
       ExecCommand(ctx, ctx.command);
       ctx.history.push_back(ctx.command);
       ctx.command = {};
+    }
+  }
+
+  {
+    const Camera3D ncam = GetCamera(ctx, player);
+    const auto farPos =
+        Vector3Add(ncam.position, Vector3Scale(Vector3Normalize(Vector3Subtract(
+                                                   ncam.target, ncam.position)),
+                                               200.0f));
+    const auto target =
+        CheckRayCollision(ctx, player.map->dynamics_world, ncam.position,
+                          farPos, RbGroups::PLAYER);
+    if (target) {
+      ctx.targetPos = target->pos;
+    } else {
+      ctx.targetPos = {};
     }
   }
 
@@ -1070,6 +1159,10 @@ void RenderViewMap(Context &ctx, const Camera &cam, Player &player,
   for (const auto &c : map.staticCubes) {
     DrawModelEx(ctx.models[c.index], c.position, {0, 1, 0}, 0, c.size, c.col);
   }
+
+  if (ctx.targetPos)
+    DrawSphere(*ctx.targetPos, 0.01f + 0.005f * sinf(20.0f * ctx.gtime),
+               {255, 255, 255, 64});
 
   const auto getTranform =
       [](const btRigidBody *rb) -> std::tuple<Vector3, Vector3, float> {
