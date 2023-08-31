@@ -15,7 +15,7 @@
 #include <vector>
 
 // script
-#include <tcl.h>
+#include "tclpp.hpp"
 
 // DB
 #include <sqlite3.h>
@@ -146,6 +146,11 @@ public:
   }
 };
 
+struct Context;
+struct GameMap;
+
+using InteractionFn = std::function<void(Context &, GameMap &)>;
+
 struct GameMap {
   GameMap() {}
   GameMap(const GameMap &) = delete;
@@ -161,6 +166,7 @@ struct GameMap {
   std::vector<StaCube> staticCubes{};
   std::vector<btRigidBody *> staticBodies{};
   Vector3 startPos{};
+  std::vector<InteractionFn> interactions{};
 };
 
 struct Player {
@@ -183,6 +189,7 @@ struct Context {
   // player
   Player player{};
   std::optional<Vector3> targetPos{};
+  int targetInteraction{};
   // GUI
   char commandBuffer[1024]{};
   std::string command{};
@@ -478,9 +485,15 @@ void LoadImgMap(Context &ctx, GameMap &map, const std::string &path,
 
   for (const auto &spawn : spawns) {
     const auto [x, y, f] = spawn.first;
+    const auto action = spawn.second;
     const Vector3 cpos{x * psz, f * fh + 0.5f, y * psz};
-    CreatePhysicCube(ctx, map, cpos, Vector3{1, 1, 1}, Vector3{0, 0, 0}, WHITE,
-                     2, Wall);
+    auto *rb = CreatePhysicCube(ctx, map, cpos, Vector3{1, 1, 1},
+                                Vector3{0, 0, 0}, WHITE, 2, Wall);
+    rb->setUserIndex2(map.interactions.size() + 1);
+    map.interactions.push_back([=](Context &ctx, GameMap &) {
+      TraceLog(LOG_INFO, "interaction: %s", action.c_str());
+      Tcl_Eval(ctx.tcl, action.c_str());
+    });
   }
 
   if (startPos) {
@@ -511,9 +524,9 @@ void LoadSlicesMap(Context &ctx, GameMap &map, const std::string &path,
   return LoadImgMap(ctx, map, path, spawns, isWall, makeColor);
 }
 
-void LoadDbMap(Context &ctx, GameMap &map, const char *path) {
+void LoadDbMap(Context &ctx, GameMap &map, const std::string &path) {
   sqlite3 *db = nullptr;
-  SQ3(sqlite3_open(path, &db));
+  SQ3(sqlite3_open(path.c_str(), &db));
 
   map.cubes.clear(CleanCube, ctx, map);
 
@@ -544,6 +557,8 @@ void LoadDbMap(Context &ctx, GameMap &map, const char *path) {
   }
 
   SQ3(sqlite3_close(db));
+
+  map.startPos = {0, 0.5, 0};
 }
 
 std::shared_ptr<GameMap> GetMap(Context &ctx, const std::string &mapName) {
@@ -552,108 +567,24 @@ std::shared_ptr<GameMap> GetMap(Context &ctx, const std::string &mapName) {
     TraceLog(LOG_INFO, "init new map");
     map = std::make_shared<GameMap>();
     InitPhysicsMap(ctx, *map);
+    TclCall(ctx.tcl, "load_map", mapName);
   }
   return map;
 }
 
-template <typename T> struct TclConvertTo {
-  static bool To(Tcl_Interp *tcl, Tcl_Obj *obj, T *v) = delete;
-};
+int Cmd_load_map_db(ClientData data, Tcl_Interp *tcl, int argc,
+                    Tcl_Obj *const *argv) {
 
-template <> struct TclConvertTo<std::string> {
-  static bool To(Tcl_Interp *tcl, Tcl_Obj *obj, std::string *v) {
-    int sz{};
-    *v = Tcl_GetStringFromObj(obj, &sz);
-    return true;
-  }
-};
+  Context &ctx = *((Context *)data);
 
-template <> struct TclConvertTo<int> {
-  static bool To(Tcl_Interp *tcl, Tcl_Obj *obj, int *v) {
-    int r{};
-    Tcl_GetIntFromObj(tcl, obj, &r);
-    *v = r;
-    return true;
-  }
-};
+  const auto mapName = TclTo<std::string>(tcl, argv[1]);
+  const auto mapPath = TclTo<std::string>(tcl, argv[2]);
 
-template <typename T> struct TclConvertTo<std::vector<T>> {
-  static bool To(Tcl_Interp *tcl, Tcl_Obj *obj, std::vector<T> *v) {
-    int sz{};
-    Tcl_ListObjLength(tcl, obj, &sz);
-    v->resize(sz);
-    for (int i = 0; i < sz; ++i) {
-      Tcl_Obj *item{};
-      Tcl_ListObjIndex(tcl, obj, i, &item);
-      TclConvertTo<T>::To(tcl, item, &(*v)[i]);
-    }
-    return true;
-  }
-};
+  TraceLog(LOG_INFO, "Cmd_load_map_db %s %s", mapName.c_str(), mapPath.c_str());
+  auto map = GetMap(ctx, mapName);
+  LoadDbMap(ctx, *map, mapPath);
 
-template <typename K, typename V> struct TclConvertTo<std::pair<K, V>> {
-  static bool To(Tcl_Interp *tcl, Tcl_Obj *obj, std::pair<K, V> *v) {
-    int sz{};
-    Tcl_ListObjLength(tcl, obj, &sz);
-    if (sz != 2)
-      return false;
-    Tcl_Obj *vk{};
-    Tcl_ListObjIndex(tcl, obj, 0, &vk);
-    TclConvertTo<K>::To(tcl, vk, &v->first);
-    Tcl_Obj *vv{};
-    Tcl_ListObjIndex(tcl, obj, 1, &vv);
-    TclConvertTo<V>::To(tcl, vv, &v->second);
-    return true;
-  }
-};
-
-template <typename T, size_t N> struct TclConvertTo<std::array<T, N>> {
-  static bool To(Tcl_Interp *tcl, Tcl_Obj *obj, std::array<T, N> *v) {
-    int sz{};
-    Tcl_ListObjLength(tcl, obj, &sz);
-    if (sz != N)
-      return false;
-    for (int i = 0; i < sz; ++i) {
-      Tcl_Obj *item{};
-      Tcl_ListObjIndex(tcl, obj, i, &item);
-      TclConvertTo<T>::To(tcl, item, &(*v)[i]);
-    }
-    return true;
-  }
-};
-
-template <typename T> T TclTo(Tcl_Interp *tcl, Tcl_Obj *obj) {
-  T r{};
-  TclConvertTo<T>::To(tcl, obj, &r);
-  return r;
-}
-
-template <typename T> struct TclConvertFrom {
-  static Tcl_Obj *From(Tcl_Interp *tcl, const T &v) = delete;
-};
-
-template <> struct TclConvertFrom<std::string> {
-  static Tcl_Obj *From(Tcl_Interp *tcl, const std::string &v) {
-    return Tcl_NewStringObj(v.c_str(), v.size());
-  }
-};
-
-template <size_t N> struct TclConvertFrom<char[N]> {
-  static Tcl_Obj *From(Tcl_Interp *tcl, std::string_view v) {
-    return Tcl_NewStringObj(&v[0], v.size());
-  }
-};
-
-template <typename T> Tcl_Obj *TclFrom(Tcl_Interp *tcl, const T &v) {
-  Tcl_Obj *r{};
-  r = TclConvertFrom<T>::From(tcl, v);
-  return r;
-}
-
-template <typename... T> bool TclCall(Tcl_Interp *tcl, const T &...args) {
-  Tcl_Obj *objs[sizeof...(T)] = {TclFrom(tcl, args)...};
-  Tcl_EvalObjv(tcl, sizeof...(T), objs, 0);
-  return true;
+  return TCL_OK;
 }
 
 int Cmd_load_map_slices(ClientData data, Tcl_Interp *tcl, int argc,
@@ -674,14 +605,20 @@ int Cmd_load_map_slices(ClientData data, Tcl_Interp *tcl, int argc,
 
 int Cmd_teleport(ClientData data, Tcl_Interp *tcl, int argc,
                  Tcl_Obj *const *argv) {
+  Context &ctx = *((Context *)data);
+
   const std::string mapName = TclTo<std::string>(tcl, argv[1]);
+
   TraceLog(LOG_INFO, "Cmd_teleport %s", mapName.c_str());
+  auto map = GetMap(ctx, mapName);
+  TeleportPlayer(ctx, ctx.player, map);
   return TCL_OK;
 }
 
 int Cmd_tracelog(ClientData data, Tcl_Interp *tcl, int argc,
                  Tcl_Obj *const *argv) {
   const std::string line = TclTo<std::string>(tcl, argv[1]);
+
   TraceLog(LOG_INFO, "%s", line.c_str());
   return TCL_OK;
 }
@@ -743,6 +680,7 @@ void Init(Context &ctx) {
 
 #define CMD(X) Tcl_CreateObjCommand(ctx.tcl, #X, Cmd_##X, &ctx, nullptr)
   CMD(load_map_slices);
+  CMD(load_map_db);
   CMD(tracelog);
   CMD(teleport);
 #undef CMD
@@ -751,11 +689,7 @@ void Init(Context &ctx) {
   InitRender(ctx);
   CreatePlayerCapsule(ctx, ctx.player);
 
-  const std::string startupMap = "hub";
   TCL(ctx.tcl, Tcl_EvalFile(ctx.tcl, "assets/init.tcl"));
-  TclCall(ctx.tcl, "load_map", startupMap);
-  auto map = GetMap(ctx, startupMap);
-  TeleportPlayer(ctx, ctx.player, map);
 }
 
 // ================================================================================
@@ -804,7 +738,8 @@ void Release(Context &ctx) {
 struct CResult {
   Vector3 pos{};
   Vector3 normal{};
-  int index{};
+  int index1{};
+  int index2{};
   bool st{};
 };
 
@@ -820,9 +755,10 @@ std::optional<CResult> CheckRayCollision(const Context &ctx,
   if (!cb.hasHit())
     return {};
   const bool st = cb.m_collisionObject->isStaticObject();
-  const int idx = cb.m_collisionObject->getUserIndex();
-  return CResult{toRlV3(cb.m_hitPointWorld), toRlV3(cb.m_hitNormalWorld), idx,
-                 st};
+  const int idx1 = cb.m_collisionObject->getUserIndex();
+  const int idx2 = cb.m_collisionObject->getUserIndex2();
+  return CResult{toRlV3(cb.m_hitPointWorld), toRlV3(cb.m_hitNormalWorld), idx1,
+                 idx2, st};
 }
 
 std::optional<CResult> CheckRayCollision(const Context &ctx,
@@ -861,7 +797,7 @@ bool MoveBullet(const Context &ctx, GameMap &map, const Particle &b) {
   AddParticles(ctx, map, cpos->pos, pdir, 0.5f, 0, 10);
 
   if (!cpos->st) {
-    const ID id{.v = uint32_t(cpos->index)};
+    const ID id{.v = uint32_t(cpos->index1)};
     const float force = 100.0f;
     if (id.t == 0) {
       auto *rb = map.cubes.at(id.i).rb;
@@ -901,7 +837,7 @@ void UpdatePlayer(Context &ctx, const Camera &cam, Player &player) {
     AddParticles(ctx, map, pos, grapple.dir, 0.1f, 1, 3);
     if (cpos) {
       const float force = -200.0f;
-      const ID id{.v = uint32_t(cpos->index)};
+      const ID id{.v = uint32_t(cpos->index1)};
       const auto delta = (toBtV3(cpos->pos) - toBtV3(cam.position)).normalize();
       AddParticles(ctx, map, cpos->pos, cpos->normal, 0.5f, 1, 5);
       if (!cpos->st) {
@@ -966,6 +902,15 @@ void UpdatePlayerInputs(Context &ctx, const Camera &cam, Player &player) {
 
   if (IsKeyPressed(KEY_F5)) {
     TeleportPlayer(ctx, player, player.map);
+  }
+
+  if (IsKeyPressed(KEY_E)) {
+    if (ctx.targetInteraction > 0 &&
+        ctx.targetInteraction <= map.interactions.size()) {
+      const auto idx = ctx.targetInteraction - 1;
+      ctx.targetInteraction = {};
+      map.interactions[idx](ctx, map);
+    }
   }
 
   if (IsKeyPressed(KEY_SPACE)) {
@@ -1066,8 +1011,13 @@ bool Update(Context &ctx) {
                           farPos, RbGroups::PLAYER);
     if (target) {
       ctx.targetPos = target->pos;
+      if (ctx.targetInteraction != target->index2) {
+        ctx.targetInteraction = target->index2;
+        TraceLog(LOG_INFO, "target interaction: %d", ctx.targetInteraction);
+      }
     } else {
       ctx.targetPos = {};
+      ctx.targetInteraction = {};
     }
   }
 
