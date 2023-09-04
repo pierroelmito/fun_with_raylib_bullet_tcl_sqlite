@@ -13,10 +13,10 @@ proc load_map { mapName } {
 			load_map_db $mapName assets/test.db
 		}
 		map01 {
-			load_map_slices $mapName assets/map01.png
+			load_map_slices $mapName assets/map01.png {}
 		}
 		map02 {
-			load_map_heightfield $mapName
+			load_map_heightfield $mapName assets/hm00.dds
 		}
 	}
 }

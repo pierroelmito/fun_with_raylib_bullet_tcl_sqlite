@@ -21,6 +21,7 @@
 #include <sqlite3.h>
 
 // physics
+#include <BulletCollision/CollisionShapes/btHeightfieldTerrainShape.h>
 #include <btBulletDynamicsCommon.h>
 
 // raylib
@@ -80,8 +81,10 @@ constexpr static const PhysicMat Box{0.6f, 0.0f, 0.0f, 0.0f};
 
 constexpr float BulletSpeed = 120.0f;
 constexpr float GrappleSpeed = 80.0f;
+constexpr float HmSize = 256.0f;
+constexpr float HmHeight = 50.0f;
 
-struct StaCube {
+struct StaMdl {
   Vector3 size{};
   Vector3 position{};
   Color col{WHITE};
@@ -163,7 +166,7 @@ struct GameMap {
   std::vector<Particle> bullets{};
   ObjectList<DynCube> cubes;
   ObjectList<DynSphere> spheres;
-  std::vector<StaCube> staticCubes{};
+  std::vector<StaMdl> staticModels{};
   std::vector<btRigidBody *> staticBodies{};
   Vector3 startPos{};
   std::vector<InteractionFn> interactions{};
@@ -205,6 +208,7 @@ struct Context {
   Shader basicShader{};
   Shader postFxShader{};
   RenderTexture rt{};
+  Image hm{};
   std::vector<Model> models{};
 };
 
@@ -381,7 +385,7 @@ btRigidBody *CreatePhysicCube(Context &ctx, GameMap &map, const Vector3 &pos,
   const Vector3 halfSize = Vector3Scale(size, 0.5f);
   btCollisionShape *collider_shape =
       new btBoxShape(toBtV3(halfSize) + btVector3{pm.extent, 0.0f, pm.extent});
-  map.staticCubes.push_back({size, pos, col, mshIndex});
+  map.staticModels.push_back({size, pos, col, mshIndex});
   btRigidBody *rb = CreatePhysicShape(ctx, map, RbGroups::WALL, collider_shape,
                                       0, ~0u, pos, rotation, pm, params);
   map.staticBodies.push_back(rb);
@@ -486,6 +490,7 @@ void LoadImgMap(Context &ctx, GameMap &map, const std::string &path,
   for (const auto &spawn : spawns) {
     const auto [x, y, f] = spawn.first;
     const auto action = spawn.second;
+    TraceLog(LOG_INFO, "\t(%d, %d, %d) '%s'", x, y, f, action.c_str());
     const Vector3 cpos{x * psz, f * fh + 0.5f, y * psz};
     auto *rb = CreatePhysicCube(ctx, map, cpos, Vector3{1, 1, 1},
                                 Vector3{0, 0, 0}, WHITE, 2, Wall);
@@ -603,6 +608,32 @@ int Cmd_load_map_slices(ClientData data, Tcl_Interp *tcl, int argc,
   return TCL_OK;
 }
 
+int Cmd_load_map_heightfield(ClientData data, Tcl_Interp *tcl, int argc,
+                             Tcl_Obj *const *argv) {
+  Context &ctx = *((Context *)data);
+
+  const auto mapName = TclTo<std::string>(tcl, argv[1]);
+  const auto mapPath = TclTo<std::string>(tcl, argv[2]);
+
+  TraceLog(LOG_INFO, "Cmd_load_map_slices %s %s", mapName.c_str(),
+           mapPath.c_str());
+  auto map = GetMap(ctx, mapName);
+  const float os = -0.5f * HmSize;
+  const float oh = -0.5f * HmHeight;
+
+  map->staticModels.push_back({{1, 1, 1}, {os, oh, os}, WHITE, 4});
+
+  btCollisionShape *collider_shape = new btHeightfieldTerrainShape(
+      ctx.hm.width, ctx.hm.height, (unsigned char *)(ctx.hm.data), HmHeight / 255.0f, oh, -oh, 1,
+      false);
+  btRigidBody *rb = CreatePhysicShape(ctx, *map, RbGroups::WALL, collider_shape,
+                                      0, ~0u, {0, -0.5f * HmHeight, 0}, {0, 0, 0}, Wall, {});
+  map->staticBodies.push_back(rb);
+  map->startPos = {0, 0.5, 0};
+
+  return TCL_OK;
+}
+
 int Cmd_teleport(ClientData data, Tcl_Interp *tcl, int argc,
                  Tcl_Obj *const *argv) {
   Context &ctx = *((Context *)data);
@@ -667,11 +698,21 @@ void InitRender(Context &ctx) {
     return m;
   };
 
+  const auto makeHm = [&](const char *path, Image &img) -> Model {
+    img = LoadImage("assets/hm00.png");
+    Mesh hm = GenMeshHeightmap(img, {HmSize, HmHeight, HmSize});
+    Model m = LoadModelFromMesh(hm);
+    m.materials[0].shader = ctx.basicShader;
+    // m.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = t;
+    return m;
+  };
+
   ctx.models = {
       makeTexturedCube("assets/crate.png"),
       makeTexturedSphere("assets/crate.png"),
       makeTexturedCube("assets/block00.png"),
       makeTexturedCube("assets/block01.png"),
+      makeHm("assets/hm00.png", ctx.hm),
   };
 }
 
@@ -679,6 +720,7 @@ void Init(Context &ctx) {
   ctx.tcl = Tcl_CreateInterp();
 
 #define CMD(X) Tcl_CreateObjCommand(ctx.tcl, #X, Cmd_##X, &ctx, nullptr)
+  CMD(load_map_heightfield);
   CMD(load_map_slices);
   CMD(load_map_db);
   CMD(tracelog);
@@ -901,7 +943,8 @@ void UpdatePlayerInputs(Context &ctx, const Camera &cam, Player &player) {
   }
 
   if (IsKeyPressed(KEY_F5)) {
-    TeleportPlayer(ctx, player, player.map);
+    auto map = GetMap(ctx, "hub");
+    TeleportPlayer(ctx, ctx.player, map);
   }
 
   if (IsKeyPressed(KEY_E)) {
@@ -1106,7 +1149,7 @@ void RenderViewMap(Context &ctx, const Camera &cam, Player &player,
     DrawRope(ctx, grapple.startPos, pos, startPos, pos, 16);
   }
 
-  for (const auto &c : map.staticCubes) {
+  for (const auto &c : map.staticModels) {
     DrawModelEx(ctx.models[c.index], c.position, {0, 1, 0}, 0, c.size, c.col);
   }
 
