@@ -95,7 +95,7 @@ void RenderViewMap(Context& ctx, const Camera&, Player& player, GameMap& map)
 	}
 
 	for (const auto& c : map.staticModels) {
-		DrawModelEx(ctx.models[c.index], c.position, { 0, 1, 0 }, 0, c.size, c.col);
+		DrawModelEx(ctx.models[c.model], c.position, { 0, 1, 0 }, 0, c.size, c.col);
 	}
 
 	if (ctx.targetPos)
@@ -116,12 +116,12 @@ void RenderViewMap(Context& ctx, const Camera&, Player& player, GameMap& map)
 
 	map.cubes.forEach([&](size_t, DynCube& c) {
 		const auto& [pos, axis, angle] = getTranform(c.rb);
-		DrawModelEx(ctx.models[c.index], pos, axis, angle, { c.size, c.size, c.size }, c.col);
+		DrawModelEx(ctx.models[c.model], pos, axis, angle, { c.size, c.size, c.size }, c.col);
 	});
 
 	map.spheres.forEach([&](size_t, DynSphere& s) {
 		const auto& [pos, axis, angle] = getTranform(s.rb);
-		DrawModelEx(ctx.models[s.index], pos, axis, angle, { s.size, s.size, s.size }, s.col);
+		DrawModelEx(ctx.models[s.model], pos, axis, angle, { s.size, s.size, s.size }, s.col);
 	});
 
 	RenderBullets(ctx, map);

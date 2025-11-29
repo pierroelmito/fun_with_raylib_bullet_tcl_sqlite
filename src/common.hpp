@@ -28,12 +28,6 @@ inline Vector3 toRlV3(btVector3 v)
 	return Vector3 { (float)v.getX(), (float)v.getY(), (float)v.getZ() };
 }
 
-inline Vector3 Reflect(Vector3 in, Vector3 n)
-{
-	const float v = Vector3DotProduct(n, in);
-	return in + n * (-2.0f * v);
-}
-
 inline Color RndCol(int minr, int dr)
 {
 	const auto rc = [&]() { return uint8_t(GetRandomValue(minr, minr + dr)); };
@@ -75,30 +69,32 @@ constexpr float GrappleSpeed = 80.0f;
 constexpr float HmSize = 256.0f;
 constexpr float HmHeight = 50.0f;
 
+using ModelIndex = uint32_t;
+
 struct StaMdl {
 	Vector3 size {};
 	Vector3 position {};
 	Color col { WHITE };
-	uint32_t index {};
+	ModelIndex model {};
 };
 
 struct DynCube {
 	float size {};
 	Color col { WHITE };
-	uint32_t index {};
+	ModelIndex model {};
 	btRigidBody* rb {};
 };
 
 struct DynSphere {
 	float size {};
 	Color col { WHITE };
-	uint32_t index {};
+	ModelIndex model {};
 	btRigidBody* rb {};
 };
 
 struct Particle {
 	Vector3 startPos {};
-	Vector3 dir;
+	Vector3 dir {};
 	double startTime {};
 	int ptype {};
 };

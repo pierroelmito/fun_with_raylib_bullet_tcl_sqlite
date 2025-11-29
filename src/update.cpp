@@ -5,12 +5,19 @@
 
 void AddParticles(const Context& ctx, GameMap& map, Vector3 pos, Vector3 normal, float radius, int ptype, int count)
 {
+	const auto rp = []() -> float {
+		return float(GetRandomValue(-1000, 1000)) / 1000.0f;
+	};
 	for (int i = 0; i < count; ++i) {
-		const float dx = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-		const float dy = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-		const float dz = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-		map.particles.push_back({ pos, normal + Vector3Normalize({ dx, dy, dz }) * radius, ctx.gtime, ptype });
+		const auto dir = Vector3Normalize({ rp(), rp(), rp() });
+		map.particles.push_back({ pos, normal + dir * radius, ctx.gtime, ptype });
 	}
+}
+
+inline Vector3 Reflect(Vector3 in, Vector3 n)
+{
+	const float v = Vector3DotProduct(n, in);
+	return in + n * (-2.0f * v);
 }
 
 bool MoveBullet(const Context& ctx, GameMap& map, const Particle& b)

@@ -101,7 +101,7 @@ void LoadImgMap(Context& ctx, GameMap& map, const std::string& path, const Slice
 	}
 
 	std::sort(map.staticModels.begin(), map.staticModels.end(), [](const StaMdl& a, const StaMdl& b) {
-		return a.index < b.index;
+		return a.model < b.model;
 	});
 
 	if (!spawns.empty()) {
