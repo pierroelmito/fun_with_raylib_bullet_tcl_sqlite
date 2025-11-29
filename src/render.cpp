@@ -3,15 +3,24 @@
 
 #include <algorithm>
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#pragma GCC diagnostic ignored "-Wenum-compare"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wnarrowing"
 #define RAYGUI_IMPLEMENTATION
 #include "raygui.h"
+#pragma GCC diagnostic pop
 
 Rectangle Inset(Rectangle r, float i = 2.0f)
 {
 	return { r.x + i, r.y + i, r.width - 2.0f * i, r.height - 2.0f * i };
 }
 
-void DrawRope(Context& ctx, Vector3 from0, Vector3 to0, Vector3 from1, Vector3 to1, int segments)
+void DrawRope(Context&, Vector3 from0, Vector3 to0, Vector3 from1, Vector3 to1, int segments)
 {
 	const int sc = 4;
 	const float rw = 0.005f;
@@ -50,7 +59,7 @@ void RenderParticles(Context& ctx, GameMap& map)
 					return true;
 				const float speed = 3.0f;
 				const float r = dt / maxt;
-				const Vector3 pos = Vector3Add(Vector3 { 0.0f, -dt * dt * 2.0f, 0.0f }, Vector3Add(p.startPos, Vector3Scale(p.dir, speed * dt)));
+				const Vector3 pos = Vector3 { 0.0f, -dt * dt * 2.0f, 0.0f } + p.startPos + p.dir * (speed * dt);
 				const uint8_t alpha = static_cast<uint8_t>(std::min(255.0f, 255.0f * (1.0f - r)));
 				const float sz = sztable[p.ptype] * (1 + r);
 				const Color bc = ctable[p.ptype];
@@ -68,20 +77,20 @@ void RenderBullets(Context& ctx, GameMap& map)
 		const float dt0 = ctx.pgtime - b.startTime;
 		const float dt1 = ctx.gtime - b.startTime;
 		const float speed = BulletSpeed;
-		const Vector3 from = Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt0));
-		const Vector3 to = Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt1));
+		const Vector3 from = b.startPos + b.dir * (speed * dt0);
+		const Vector3 to = b.startPos + b.dir * (speed * dt1);
 		const float sz = 0.01f;
 		DrawCapsule(from, to, sz, 8, 4, col);
 	}
 }
 
-void RenderViewMap(Context& ctx, const Camera& cam, Player& player, GameMap& map)
+void RenderViewMap(Context& ctx, const Camera&, Player& player, GameMap& map)
 {
 	if (player.grapple) {
 		Vector3 pos {};
 		const Vector3 startPos = GetCameraOffset(ctx, player, { 0, -0.09, 0.15 });
 		const Particle& grapple = std::get<Particle>(*player.grapple);
-		CheckRayCollision(ctx, map.dynamics_world, grapple, GrappleSpeed, &pos);
+		CheckParticleCollision(ctx, map.dynamics_world, grapple, GrappleSpeed, &pos);
 		DrawRope(ctx, grapple.startPos, pos, startPos, pos, 16);
 	}
 
@@ -105,12 +114,12 @@ void RenderViewMap(Context& ctx, const Camera& cam, Player& player, GameMap& map
 		return { pos, axis, angle };
 	};
 
-	map.cubes.forEach([&](size_t i, DynCube& c) {
+	map.cubes.forEach([&](size_t, DynCube& c) {
 		const auto& [pos, axis, angle] = getTranform(c.rb);
-		DrawModelEx(ctx.models[c.index], pos, axis, angle, c.size, c.col);
+		DrawModelEx(ctx.models[c.index], pos, axis, angle, { c.size, c.size, c.size }, c.col);
 	});
 
-	map.spheres.forEach([&](size_t i, DynSphere& s) {
+	map.spheres.forEach([&](size_t, DynSphere& s) {
 		const auto& [pos, axis, angle] = getTranform(s.rb);
 		DrawModelEx(ctx.models[s.index], pos, axis, angle, { s.size, s.size, s.size }, s.col);
 	});

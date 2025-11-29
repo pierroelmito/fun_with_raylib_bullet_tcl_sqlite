@@ -31,7 +31,7 @@ inline Vector3 toRlV3(btVector3 v)
 inline Vector3 Reflect(Vector3 in, Vector3 n)
 {
 	const float v = Vector3DotProduct(n, in);
-	return Vector3Add(in, Vector3Scale(n, -2.0f * v));
+	return in + n * (-2.0f * v);
 }
 
 inline Color RndCol(int minr, int dr)
@@ -83,7 +83,7 @@ struct StaMdl {
 };
 
 struct DynCube {
-	Vector3 size {};
+	float size {};
 	Color col { WHITE };
 	uint32_t index {};
 	btRigidBody* rb {};
@@ -245,17 +245,14 @@ struct CResult {
 };
 
 std::optional<CResult> CheckRayCollision(const Context& ctx, btDiscreteDynamicsWorld* world, Vector3 from, Vector3 to, int skipFlags = 0);
-std::optional<CResult> CheckRayCollision(const Context& ctx, btDiscreteDynamicsWorld* world, const Particle& b, float speed, Vector3* pos = nullptr);
+std::optional<CResult> CheckParticleCollision(const Context& ctx, btDiscreteDynamicsWorld* world, const Particle& b, float speed, Vector3* pos = nullptr);
 
 Vector3 GetCameraOffset(Context& ctx, Player& player, Vector3 o);
 Camera3D GetCamera(Context& ctx, Player& player);
 
 void ExecCommand(Context& ctx, const std::string& cmd);
 
-btRigidBody* CreatePhysicCube(Context& ctx, GameMap& map, const Vector3& pos, const Vector3& size, const Vector3& rotation, Color col, uint32_t mshIndex, const PhysicMat& pm, const std::optional<DynParams>& params = {});
 btRigidBody* CreatePhysicShape(Context&, GameMap& map, int group, btCollisionShape* collider_shape, uint32_t t, uint32_t index, const Vector3& pos, const Vector3& rotation, const PhysicMat& pm, const std::optional<DynParams>& params = {});
-void CreatePhysicCube(Context& ctx, GameMap& map, uint32_t index, DynCube& c, const Vector3& pos, const Vector3& rotation, const PhysicMat& pm, const std::optional<DynParams>& params = {});
-void CreatePhysicSphere(Context& ctx, GameMap& map, uint32_t index, DynSphere& s, const Vector3& pos, const PhysicMat& pm, const std::optional<DynParams>& params = {});
 void CreatePlayerCapsule(Context&, Player& player);
 
 void CleanRigidBody(Context& ctx, GameMap& map, btRigidBody*& rb);

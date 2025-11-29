@@ -1,6 +1,8 @@
 
 #include "common.hpp"
 
+#include <algorithm>
+
 void InitPhysicsMap(Context&, GameMap& map)
 {
 	map.collision_configuration = new btDefaultCollisionConfiguration();
@@ -13,6 +15,27 @@ void InitPhysicsMap(Context&, GameMap& map)
 
 using SliceCoord = std::array<int, 3>;
 using SliceSpawns = std::vector<std::pair<SliceCoord, std::string>>;
+
+btCollisionShape* CreateBoxShape(Context&, const Vector3& size, const PhysicMat& pm)
+{
+	const Vector3 halfSize = size * 0.5f;
+	btCollisionShape* collider_shape = new btBoxShape(toBtV3(halfSize) + btVector3 { pm.extent, 0.0f, pm.extent });
+	return collider_shape;
+}
+
+btRigidBody* CreateRigidBody(Context& ctx, GameMap& map, const Vector3& pos, const Vector3& size, const Vector3& rotation, Color col, uint32_t mshIndex, btCollisionShape* shape, const PhysicMat& pm, const std::optional<DynParams>& params = {})
+{
+	map.staticModels.push_back({ size, pos, col, mshIndex });
+	btRigidBody* rb = CreatePhysicShape(ctx, map, RbGroups::WALL, shape, 0, ~0u, pos, rotation, pm, params);
+	map.staticBodies.push_back(rb);
+	return rb;
+}
+
+btRigidBody* CreatePhysicCubeStatic(Context& ctx, GameMap& map, const Vector3& pos, const Vector3& size, const Vector3& rotation, Color col, uint32_t mshIndex, const PhysicMat& pm, const std::optional<DynParams>& params = {})
+{
+	btCollisionShape* shape = CreateBoxShape(ctx, size, pm);
+	return CreateRigidBody(ctx, map, pos, size, rotation, col, mshIndex, shape, pm, params);
+}
 
 void LoadImgMap(Context& ctx, GameMap& map, const std::string& path, const SliceSpawns& spawns, const std::function<bool(Color)>& isWall, const std::function<Color(Color, int)>& makeColor)
 {
@@ -37,6 +60,8 @@ void LoadImgMap(Context& ctx, GameMap& map, const std::string& path, const Slice
 		}
 		return { 255, 255, 255, 0 };
 	};
+
+	btCollisionShape* shapeWall = CreateBoxShape(ctx, szc, Wall);
 
 	for (int f = -1; f < floors + 1; ++f) {
 		bool emptyFloor = f >= 0;
@@ -64,7 +89,7 @@ void LoadImgMap(Context& ctx, GameMap& map, const std::string& path, const Slice
 						const Color co = GetMapAt(x + offsets[i][0], y + offsets[i][1], f + offsets[i][2]);
 						if (!isWall(co)) {
 							const Color col = makeColor(cc, f);
-							CreatePhysicCube(ctx, map, cpos, szc, { 0, 0, 0 }, col, index, Wall);
+							CreateRigidBody(ctx, map, cpos, szc, { 0, 0, 0 }, col, index, shapeWall, Wall);
 							break;
 						}
 					}
@@ -75,17 +100,24 @@ void LoadImgMap(Context& ctx, GameMap& map, const std::string& path, const Slice
 			break;
 	}
 
-	for (const auto& spawn : spawns) {
-		const auto [x, y, f] = spawn.first;
-		const auto action = spawn.second;
-		TraceLog(LOG_INFO, "\t(%d, %d, %d) '%s'", x, y, f, action.c_str());
-		const Vector3 cpos { x * psz, f * fh + 0.5f, y * psz };
-		auto* rb = CreatePhysicCube(ctx, map, cpos, Vector3 { 1, 1, 1 }, Vector3 { 0, 0, 0 }, WHITE, 2, Wall);
-		rb->setUserIndex2(map.interactions.size() + 1);
-		map.interactions.push_back([=](Context& ctx, GameMap&) {
-			TraceLog(LOG_INFO, "interaction: %s", action.c_str());
-			Tcl_Eval(ctx.tcl, action.c_str());
-		});
+	std::sort(map.staticModels.begin(), map.staticModels.end(), [](const StaMdl& a, const StaMdl& b) {
+		return a.index < b.index;
+	});
+
+	if (!spawns.empty()) {
+		btCollisionShape* shapeSpawn = CreateBoxShape(ctx, Vector3 { 1, 1, 1 }, Wall);
+		for (const auto& spawn : spawns) {
+			const auto [x, y, f] = spawn.first;
+			const auto action = spawn.second;
+			TraceLog(LOG_INFO, "\t(%d, %d, %d) '%s'", x, y, f, action.c_str());
+			const Vector3 cpos { x * psz, f * fh + 0.5f, y * psz };
+			auto* rb = CreateRigidBody(ctx, map, cpos, Vector3 { 1, 1, 1 }, Vector3 { 0, 0, 0 }, WHITE, 2, shapeSpawn, Wall);
+			rb->setUserIndex2(map.interactions.size() + 1);
+			map.interactions.push_back([=](Context& ctx, GameMap&) {
+				TraceLog(LOG_INFO, "interaction: %s", action.c_str());
+				Tcl_Eval(ctx.tcl, action.c_str());
+			});
+		}
 	}
 
 	if (startPos)
@@ -144,7 +176,7 @@ void LoadDbMap(Context& ctx, GameMap& map, const std::string& path)
 				c = Color { uint8_t(r), uint8_t(g), uint8_t(b), 255 };
 			}
 			const Vector3 pos { px, py + 0.5f * sy, pz };
-			CreatePhysicCube(ctx, map, pos, { sx, sy, sz }, { 0, 0, 0 }, c, 2, Wall);
+			CreatePhysicCubeStatic(ctx, map, pos, { sx, sy, sz }, { 0, 0, 0 }, c, 2, Wall);
 		}
 		SQ3(sqlite3_finalize(st));
 	}

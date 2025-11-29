@@ -38,10 +38,10 @@ Vector3 GetCameraOffset(Context&, Player& player, Vector3 o)
 	const Vector3 pos = toRlV3(p + btVector3 { 0, 0.3, 0 });
 	const Vector3 d { sinf(player.camAngles.x), 0, cosf(player.camAngles.x) };
 	const Vector3 n { -d.z, 0, d.x };
-	const Vector3 v0 = Vector3Scale(d, o.x);
-	const Vector3 v1 = Vector3Scale({ 0, 1, 0 }, o.y);
-	const Vector3 v2 = Vector3Scale(n, o.z);
-	return Vector3Add(pos, Vector3Add(Vector3Add(v0, v1), v2));
+	const Vector3 v0 = d * o.x;
+	const Vector3 v1 = Vector3 { 0, 1, 0 } * o.y;
+	const Vector3 v2 = n * o.z;
+	return pos + v0 + v1 + v2;
 }
 
 Camera3D GetCamera(Context&, Player& player)
@@ -58,7 +58,7 @@ Camera3D GetCamera(Context&, Player& player)
 	r.fovy = 30.0f;
 	r.up = { 0, 1, 0 };
 	r.projection = CAMERA_PERSPECTIVE;
-	r.target = Vector3Add(pos, Vector3Scale(delta, -2.0f));
+	r.target = pos + delta * -2.0f;
 	r.position = pos;
 
 	return r;
@@ -129,29 +129,6 @@ btRigidBody* CreatePhysicShape(Context&, GameMap& map, int group, btCollisionSha
 	return body;
 }
 
-btRigidBody* CreatePhysicCube(Context& ctx, GameMap& map, const Vector3& pos, const Vector3& size, const Vector3& rotation, Color col, uint32_t mshIndex, const PhysicMat& pm, const std::optional<DynParams>& params)
-{
-	const Vector3 halfSize = Vector3Scale(size, 0.5f);
-	btCollisionShape* collider_shape = new btBoxShape(toBtV3(halfSize) + btVector3 { pm.extent, 0.0f, pm.extent });
-	map.staticModels.push_back({ size, pos, col, mshIndex });
-	btRigidBody* rb = CreatePhysicShape(ctx, map, RbGroups::WALL, collider_shape, 0, ~0u, pos, rotation, pm, params);
-	map.staticBodies.push_back(rb);
-	return rb;
-}
-
-void CreatePhysicCube(Context& ctx, GameMap& map, uint32_t index, DynCube& c, const Vector3& pos, const Vector3& rotation, const PhysicMat& pm, const std::optional<DynParams>& params)
-{
-	const Vector3 halfSize = Vector3Scale(c.size, 0.5f);
-	btCollisionShape* collider_shape = new btBoxShape(toBtV3(halfSize) + btVector3 { pm.extent, 0.0f, pm.extent });
-	c.rb = CreatePhysicShape(ctx, map, RbGroups::OBJECT, collider_shape, 0, index, pos, rotation, pm, params);
-}
-
-void CreatePhysicSphere(Context& ctx, GameMap& map, uint32_t index, DynSphere& s, const Vector3& pos, const PhysicMat& pm, const std::optional<DynParams>& params)
-{
-	btCollisionShape* collider_shape = new btSphereShape(s.size);
-	s.rb = CreatePhysicShape(ctx, map, RbGroups::OBJECT, collider_shape, 1, index, pos, { 0, 0, 0 }, pm, params);
-}
-
 void TeleportPlayer(Context& ctx, Player& player, std::shared_ptr<GameMap> map)
 {
 	if (player.map != map) {
@@ -185,12 +162,12 @@ std::optional<CResult> CheckRayCollision(const Context&, btDiscreteDynamicsWorld
 	return CResult { toRlV3(cb.m_hitPointWorld), toRlV3(cb.m_hitNormalWorld), idx1, idx2, st };
 }
 
-std::optional<CResult> CheckRayCollision(const Context& ctx, btDiscreteDynamicsWorld* world, const Particle& b, float speed, Vector3* pos)
+std::optional<CResult> CheckParticleCollision(const Context& ctx, btDiscreteDynamicsWorld* world, const Particle& b, float speed, Vector3* pos)
 {
 	const float dt0 = ctx.pgtime - b.startTime;
 	const float dt1 = ctx.gtime - b.startTime;
-	const Vector3 from = Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt0));
-	const Vector3 to = Vector3Add(b.startPos, Vector3Scale(b.dir, speed * dt1));
+	const Vector3 from = b.startPos + b.dir * (speed * dt0);
+	const Vector3 to = b.startPos + b.dir * (speed * dt1);
 	if (pos)
 		*pos = to;
 	return CheckRayCollision(ctx, world, from, to, RbGroups::PLAYER);

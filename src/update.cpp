@@ -9,13 +9,13 @@ void AddParticles(const Context& ctx, GameMap& map, Vector3 pos, Vector3 normal,
 		const float dx = float(GetRandomValue(-1000, 1000)) / 1000.0f;
 		const float dy = float(GetRandomValue(-1000, 1000)) / 1000.0f;
 		const float dz = float(GetRandomValue(-1000, 1000)) / 1000.0f;
-		map.particles.push_back({ pos, Vector3Add(normal, Vector3Scale(Vector3Normalize({ dx, dy, dz }), radius)), ctx.gtime, ptype });
+		map.particles.push_back({ pos, normal + Vector3Normalize({ dx, dy, dz }) * radius, ctx.gtime, ptype });
 	}
 }
 
 bool MoveBullet(const Context& ctx, GameMap& map, const Particle& b)
 {
-	const auto cpos = CheckRayCollision(ctx, map.dynamics_world, b, BulletSpeed);
+	const auto cpos = CheckParticleCollision(ctx, map.dynamics_world, b, BulletSpeed);
 	if (!cpos)
 		return false;
 
@@ -57,7 +57,7 @@ void UpdatePlayer(Context& ctx, const Camera& cam, Player& player)
 	if (player.grapple) {
 		const Particle& grapple = std::get<Particle>(*player.grapple);
 		Vector3 pos {};
-		auto cpos = CheckRayCollision(ctx, map.dynamics_world, grapple, GrappleSpeed, &pos);
+		auto cpos = CheckParticleCollision(ctx, map.dynamics_world, grapple, GrappleSpeed, &pos);
 		AddParticles(ctx, map, pos, grapple.dir, 0.1f, 1, 3);
 		if (cpos) {
 			const float force = -200.0f;
@@ -82,6 +82,19 @@ void UpdatePlayer(Context& ctx, const Camera& cam, Player& player)
 	}
 }
 
+void CreatePhysicCube(Context& ctx, GameMap& map, uint32_t index, DynCube& c, const Vector3& pos, const PhysicMat& pm, const std::optional<DynParams>& params)
+{
+	const Vector3 halfSize = Vector3 { c.size, c.size, c.size } * 0.5f;
+	btCollisionShape* collider_shape = new btBoxShape(toBtV3(halfSize) + btVector3 { pm.extent, 0.0f, pm.extent });
+	c.rb = CreatePhysicShape(ctx, map, RbGroups::OBJECT, collider_shape, 0, index, pos, { 1, 0, 0 }, pm, params);
+}
+
+void CreatePhysicSphere(Context& ctx, GameMap& map, uint32_t index, DynSphere& s, const Vector3& pos, const PhysicMat& pm, const std::optional<DynParams>& params)
+{
+	btCollisionShape* collider_shape = new btSphereShape(s.size);
+	s.rb = CreatePhysicShape(ctx, map, RbGroups::OBJECT, collider_shape, 1, index, pos, { 0, 0, 0 }, pm, params);
+}
+
 void UpdatePlayerInputs(Context& ctx, const Camera& cam, Player& player)
 {
 	GameMap& map = *player.map;
@@ -98,7 +111,7 @@ void UpdatePlayerInputs(Context& ctx, const Camera& cam, Player& player)
 		const float speed = sprint ? 5.0f : 2.5f;
 		const Vector3 delta { sinf(player.camAngles.x), 0, cosf(player.camAngles.x) };
 		const Vector3 side { delta.z, delta.y, -delta.x };
-		const Vector3 move = Vector3Scale(delta, -1);
+		const Vector3 move = delta * -1;
 
 		float fwd = 0.0f;
 		if (IsKeyDown(KEY_W))
@@ -152,16 +165,16 @@ void UpdatePlayerInputs(Context& ctx, const Camera& cam, Player& player)
 
 	if (IsKeyPressed(KEY_G)) {
 		const float sz = 0.5f;
-		const Vector3 dir = Vector3Scale(Vector3Normalize(Vector3Subtract(cam.target, cam.position)), 20.0f);
+		const Vector3 dir = Vector3Normalize(cam.target - cam.position) * 20.0f;
 		const Color col = RndCol(146, 100);
-		map.cubes.push_back({ { sz, sz, sz }, col, 0 }, [&](size_t i, DynCube& c) {
-			CreatePhysicCube(ctx, map, i, c, cam.target, { 1, 0, 0 }, Box, DynParams { 1.0f, dir });
+		map.cubes.push_back({ sz, col, 0 }, [&](size_t i, DynCube& c) {
+			CreatePhysicCube(ctx, map, i, c, cam.target, Box, DynParams { 1.0f, dir });
 		});
 	}
 
 	if (IsKeyPressed(KEY_F)) {
 		const float sz = 0.5f * 0.5f;
-		const Vector3 dir = Vector3Scale(Vector3Normalize(Vector3Subtract(cam.target, cam.position)), 20.0f);
+		const Vector3 dir = Vector3Normalize(cam.target - cam.position) * 20.0f;
 		const Color col = RndCol(146, 100);
 		map.spheres.push_back({ sz, col, 1 }, [&](size_t i, DynSphere& s) {
 			CreatePhysicSphere(ctx, map, i, s, cam.target, Box, DynParams { 1.0f, dir });
@@ -169,7 +182,7 @@ void UpdatePlayerInputs(Context& ctx, const Camera& cam, Player& player)
 	}
 
 	{
-		const Vector3 dir = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
+		const Vector3 dir = Vector3Normalize(cam.target - cam.position);
 		if (IsMouseButtonPressed(0)) {
 			const Vector3 gunPos = GetCameraOffset(ctx, player, { 0, -0.09, -0.15 });
 			map.bullets.push_back({ gunPos, dir, ctx.gtime });
@@ -191,7 +204,7 @@ bool Update(Context& ctx)
 	const bool esc = IsKeyPressed(KEY_ESCAPE);
 	const bool quit = ctx.lockCursor && esc;
 
-	player.deltaCamAngles = Vector2Scale(player.deltaCamAngles, 0.95f);
+	player.deltaCamAngles = player.deltaCamAngles * 0.95f;
 	ctx.pgtime = ctx.gtime;
 	ctx.gtime += 1.0 / float(ctx.FPS);
 
@@ -222,7 +235,7 @@ bool Update(Context& ctx)
 
 	{
 		const Camera3D ncam = GetCamera(ctx, player);
-		const auto farPos = Vector3Add(ncam.position, Vector3Scale(Vector3Normalize(Vector3Subtract(ncam.target, ncam.position)), 200.0f));
+		const auto farPos = ncam.position + Vector3Normalize(ncam.target - ncam.position) * 200.0f;
 		const auto target = CheckRayCollision(ctx, player.map->dynamics_world, ncam.position, farPos, RbGroups::PLAYER);
 		if (target) {
 			ctx.targetPos = target->pos;
