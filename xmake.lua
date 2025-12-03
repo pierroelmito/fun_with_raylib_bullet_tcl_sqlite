@@ -21,9 +21,6 @@ rule("shader")
 		batchcmds:add_depfiles(sourcefile, global, common)
 	end)
 
-
-
-
 target("main")
 	set_policy("build.warning", true)
 	set_warnings("all", "extra")
@@ -33,7 +30,11 @@ target("main")
 	add_defines({
 	  "BT_USE_DOUBLE_PRECISION"
 	})
-	add_includedirs("/usr/include/bullet")
+	if is_plat("msys") then
+		add_includedirs("c:/msys64/ucrt64/include/bullet")
+	else
+		add_includedirs("/usr/include/bullet")
+	end
 	add_links({
 	  "tcl",
 	  "raylib",
